@@ -6,6 +6,7 @@ Each function returns {"success": bool, "confirmation": str}.
 """
 
 import asyncio
+import json
 import logging
 import os
 import re
@@ -16,6 +17,179 @@ from urllib.parse import quote
 log = logging.getLogger("jarvis.actions")
 
 DESKTOP_PATH = Path.home() / "Desktop"
+IS_WINDOWS = os.name == "nt"
+
+_WINDOWS_BROWSER_PATHS = {
+    "chrome": [
+        r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+        r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+    ],
+    "firefox": [
+        r"C:\Program Files\Mozilla Firefox\firefox.exe",
+        r"C:\Program Files (x86)\Mozilla Firefox\firefox.exe",
+    ],
+}
+CODEX_WINDOWS_APP_ID = "OpenAI.Codex_2p2nqsd0c76g0!App"
+
+_APP_SPECS = {
+    "obsidian": {
+        "aliases": {
+            "obsidian",
+            "obsidian app",
+            "obsidian application",
+            "my obsidian",
+            "my obsidian app",
+            "obsidian notes",
+        },
+        "windows_protocol": "obsidian://open",
+        "windows_paths": [
+            str(Path.home() / "AppData" / "Local" / "Programs" / "Obsidian" / "Obsidian.exe"),
+        ],
+        "darwin_app": "Obsidian",
+        "confirmation": "Opened Obsidian, sir.",
+    },
+    "vscode": {
+        "aliases": {
+            "vscode",
+            "vs code",
+            "visual studio code",
+            "code",
+        },
+        "windows_protocol": "vscode://",
+        "windows_paths": [
+            str(Path.home() / "AppData" / "Local" / "Programs" / "Microsoft VS Code" / "Code.exe"),
+            r"C:\Program Files\Microsoft VS Code\Code.exe",
+            r"C:\Program Files (x86)\Microsoft VS Code\Code.exe",
+        ],
+        "darwin_app": "Visual Studio Code",
+        "confirmation": "Opened Visual Studio Code, sir.",
+    },
+    "explorer": {
+        "aliases": {
+            "explorer",
+            "file explorer",
+            "windows explorer",
+            "my files",
+            "files",
+        },
+        "windows_executable": "explorer.exe",
+        "darwin_app": "Finder",
+        "confirmation": "Opened File Explorer, sir.",
+    },
+    "terminal": {
+        "aliases": {
+            "terminal",
+            "windows terminal",
+            "powershell",
+            "power shell",
+            "command prompt",
+            "cmd",
+        },
+        "windows_executable": "powershell.exe",
+        "darwin_app": "Terminal",
+        "confirmation": "Opened the terminal, sir.",
+    },
+    "chrome": {
+        "aliases": {
+            "chrome",
+            "google chrome",
+            "browser",
+            "web browser",
+        },
+        "windows_paths": _WINDOWS_BROWSER_PATHS["chrome"],
+        "darwin_app": "Google Chrome",
+        "confirmation": "Opened Chrome, sir.",
+    },
+    "codex": {
+        "aliases": {
+            "codex",
+            "openai codex",
+            "codex app",
+            "codex desktop",
+        },
+        "windows_app_id": CODEX_WINDOWS_APP_ID,
+        "confirmation": "Opened Codex, sir.",
+    },
+}
+
+_APP_ALIAS_LOOKUP = {
+    alias: key
+    for key, spec in _APP_SPECS.items()
+    for alias in spec["aliases"]
+}
+
+
+def _ps_quote(value: str) -> str:
+    return "'" + value.replace("'", "''") + "'"
+
+
+def _first_existing_path(paths: list[str]) -> str | None:
+    for path in paths:
+        if path and os.path.exists(path):
+            return path
+    return None
+
+
+def get_dev_agent_mode() -> str:
+    """Return the configured coding agent mode."""
+    mode = os.getenv("DEV_AGENT", "").strip().lower()
+    if mode:
+        return mode
+    return "codex" if IS_WINDOWS else "claude"
+
+
+def should_use_codex_delegate() -> bool:
+    """True when JARVIS should hand coding work to Codex on this machine."""
+    return IS_WINDOWS and get_dev_agent_mode() in {"auto", "codex", "codex_handoff"}
+
+
+def normalize_desktop_app_name(text: str) -> str | None:
+    """Return a canonical app key for short open/launch commands."""
+    cleaned = re.sub(r"[^a-z0-9\s]", " ", text.lower()).strip()
+    cleaned = re.sub(r"\b(the|app|application|please|now|for me|for us)\b", " ", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+
+    command_prefixes = (
+        "open ",
+        "launch ",
+        "start ",
+        "run ",
+        "show ",
+        "pull up ",
+    )
+    for prefix in command_prefixes:
+        if cleaned.startswith(prefix):
+            cleaned = cleaned[len(prefix):].strip()
+            break
+
+    cleaned = re.sub(r"\b(on my computer|on my pc|for me)\b", " ", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return _APP_ALIAS_LOOKUP.get(cleaned)
+
+
+async def _start_windows_process(file_path: str, arguments: list[str] | None = None) -> tuple[bool, str]:
+    """Launch a Windows process or protocol handler in a visible way."""
+    script = [
+        "$ErrorActionPreference = 'Stop'",
+        f"$target = {_ps_quote(file_path)}",
+    ]
+    if arguments:
+        arg_list = ", ".join(_ps_quote(arg) for arg in arguments)
+        script.append(f"$argsList = @({arg_list})")
+        script.append("Start-Process -FilePath $target -ArgumentList $argsList")
+    else:
+        script.append("Start-Process -FilePath $target")
+
+    proc = await asyncio.create_subprocess_exec(
+        "powershell",
+        "-NoProfile",
+        "-Command",
+        "; ".join(script),
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, stderr = await proc.communicate()
+    return proc.returncode == 0, (stderr or stdout).decode(errors="ignore").strip()
 
 
 async def _mark_terminal_as_jarvis(revert_after: float = 5.0):
@@ -82,6 +256,18 @@ async def _revert_terminal_theme(profile_name: str):
 
 async def open_terminal(command: str = "") -> dict:
     """Open Terminal.app and optionally run a command. Marks it blue for JARVIS."""
+    if IS_WINDOWS:
+        arguments = ["-NoExit"]
+        if command:
+            arguments.extend(["-Command", command])
+        success, detail = await _start_windows_process("powershell.exe", arguments)
+        if not success and detail:
+            log.error(f"open_terminal failed: {detail}")
+        return {
+            "success": success,
+            "confirmation": "Terminal is open, sir." if success else "I had trouble opening Terminal, sir.",
+        }
+
     if command:
         escaped = command.replace('"', '\\"')
         script = (
@@ -116,6 +302,21 @@ async def open_terminal(command: str = "") -> dict:
 async def open_browser(url: str, browser: str = "chrome") -> dict:
     """Open URL in user's browser (Chrome or Firefox)."""
     escaped_url = url.replace('"', '\\"')
+
+    if IS_WINDOWS:
+        browser_key = "firefox" if browser.lower() == "firefox" else "chrome"
+        executable = _first_existing_path(_WINDOWS_BROWSER_PATHS.get(browser_key, []))
+        if executable:
+            success, detail = await _start_windows_process(executable, [url])
+        else:
+            success, detail = await _start_windows_process(url)
+        if not success and detail:
+            log.error(f"open_browser ({browser_key}) failed: {detail}")
+        app_name = "Firefox" if browser_key == "firefox" else "Chrome"
+        return {
+            "success": success,
+            "confirmation": f"Pulled that up in {app_name}, sir." if success else f"{app_name} ran into a problem, sir.",
+        }
 
     if browser.lower() == "firefox":
         app_name = "Firefox"
@@ -154,7 +355,160 @@ async def open_chrome(url: str) -> dict:
     return await open_browser(url, "chrome")
 
 
+async def open_app(target: str) -> dict:
+    """Open a supported desktop application by name."""
+    app_key = normalize_desktop_app_name(target) or target.strip().lower()
+    spec = _APP_SPECS.get(app_key)
+    if not spec:
+        return {
+            "success": False,
+            "confirmation": f"I don't know how to open {target}, sir.",
+        }
+
+    if IS_WINDOWS:
+        app_id = spec.get("windows_app_id")
+        executable = spec.get("windows_executable")
+        if app_id:
+            success, detail = await _start_windows_process("explorer.exe", [f"shell:AppsFolder\\{app_id}"])
+        elif executable:
+            success, detail = await _start_windows_process(executable)
+        else:
+            path = _first_existing_path(spec.get("windows_paths", []))
+            if path:
+                success, detail = await _start_windows_process(path)
+            elif spec.get("windows_protocol"):
+                success, detail = await _start_windows_process(spec["windows_protocol"])
+            else:
+                success, detail = False, f"No Windows launch target configured for {target}"
+
+        if not success and detail:
+            log.error(f"open_app ({app_key}) failed: {detail}")
+        return {
+            "success": success,
+            "confirmation": spec["confirmation"] if success else f"I had trouble opening {target}, sir.",
+        }
+
+    app_name = spec.get("darwin_app")
+    if not app_name:
+        return {
+            "success": False,
+            "confirmation": f"I had trouble opening {target}, sir.",
+        }
+
+    script = (
+        f'tell application "{app_name}"\n'
+        "    activate\n"
+        "end tell"
+    )
+    proc = await asyncio.create_subprocess_exec(
+        "osascript", "-e", script,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    _, stderr = await proc.communicate()
+    success = proc.returncode == 0
+    if not success:
+        log.error(f"open_app ({app_key}) failed: {stderr.decode()}")
+    return {
+        "success": success,
+        "confirmation": spec["confirmation"] if success else f"I had trouble opening {target}, sir.",
+    }
+
+
+async def handoff_to_codex(working_dir: str, prompt: str, project_name: str | None = None) -> dict:
+    """Prepare a coding handoff for the Codex desktop app on Windows."""
+    if not IS_WINDOWS:
+        return {
+            "success": False,
+            "confirmation": "Codex handoff is currently set up for Windows only, sir.",
+        }
+
+    project_path = Path(working_dir)
+    project_path.mkdir(parents=True, exist_ok=True)
+    task_file = project_path / "CODEX_TASK.md"
+    announce_script = project_path / "JARVIS_ANNOUNCE.ps1"
+    project_label = project_name or project_path.name
+    announce_script.write_text(
+        "$Text = ($args -join ' ').Trim()\n"
+        "if (-not $Text) { Write-Error 'Provide announcement text.'; exit 1 }\n"
+        "$payload = @{ text = $Text; source = 'codex' } | ConvertTo-Json -Compress\n"
+        "$tmp = New-TemporaryFile\n"
+        "Set-Content -LiteralPath $tmp -Value $payload -Encoding UTF8\n"
+        "try {\n"
+        "  curl.exe -k -s -X POST https://localhost:8340/api/announce -H \"Content-Type: application/json\" --data-binary \"@$tmp\"\n"
+        "} finally {\n"
+        "  Remove-Item -LiteralPath $tmp -ErrorAction SilentlyContinue\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    handoff_text = (
+        f"# Codex Task\n\n"
+        f"Project: {project_label}\n"
+        f"Working directory: {project_path}\n\n"
+        f"## Request\n{prompt.strip()}\n\n"
+        f"## Notes\n"
+        f"- Work directly in this folder.\n"
+        f"- If there is an existing codebase, preserve current patterns unless the prompt says otherwise.\n"
+        f"- Summarize what changed and any blockers when done.\n"
+        f"- When you finish or hit a blocker, run `.\\{announce_script.name} \"short spoken update\"` so JARVIS can read it aloud.\n"
+    )
+    task_file.write_text(handoff_text, encoding="utf-8")
+
+    clipboard_text = (
+        f"Please work in this folder:\n{project_path}\n\n"
+        f"Task:\n{prompt.strip()}\n\n"
+        f"A task brief has also been written to:\n{task_file}\n"
+        f"When done, announce the result with:\n{announce_script}\n"
+    )
+    clipboard_proc = await asyncio.create_subprocess_exec(
+        "powershell",
+        "-NoProfile",
+        "-Command",
+        f"Set-Clipboard -Value {_ps_quote(clipboard_text)}",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    clipboard_stdout, clipboard_stderr = await clipboard_proc.communicate()
+    if clipboard_proc.returncode != 0:
+        detail = (clipboard_stderr or clipboard_stdout).decode(errors="ignore").strip()
+        if detail:
+            log.warning(f"Failed to copy Codex handoff to clipboard: {detail}")
+
+    app_result = await open_app("codex")
+    folder_result = await _start_windows_process("explorer.exe", [str(project_path)])
+
+    success = app_result["success"] and folder_result[0]
+    if not folder_result[0] and folder_result[1]:
+        log.error(f"Failed to open project folder for Codex handoff: {folder_result[1]}")
+
+    confirmation = (
+        f"Opened Codex, copied the task brief, and opened {project_label} for handoff, sir."
+        if success
+        else "I prepared the Codex handoff, but part of the launch sequence ran into trouble, sir."
+    )
+    return {
+        "success": success,
+        "confirmation": confirmation,
+        "task_file": str(task_file),
+    }
+
+
 async def open_claude_in_project(project_dir: str, prompt: str) -> dict:
+    if IS_WINDOWS:
+        claude_md = Path(project_dir) / "CLAUDE.md"
+        claude_md.write_text(f"# Task\n\n{prompt}\n\nBuild this completely. If web app, make index.html work standalone.\n")
+
+        command = f'Set-Location "{project_dir}"; claude --dangerously-skip-permissions'
+        success, detail = await _start_windows_process("powershell.exe", ["-NoExit", "-Command", command])
+        if not success and detail:
+            log.error(f"open_claude_in_project failed: {detail}")
+        return {
+            "success": success,
+            "confirmation": "Claude Code is running in Terminal, sir. You can watch the progress."
+            if success
+            else "Had trouble spawning Claude Code, sir.",
+        }
+
     """Open Terminal, cd to project dir, run Claude Code interactively.
 
     Writes the prompt to CLAUDE.md (which claude reads automatically on startup)
@@ -197,6 +551,12 @@ async def prompt_existing_terminal(project_name: str, prompt: str) -> dict:
     Uses System Events keystroke to type into an active Claude Code session
     rather than `do script` which would open a new shell.
     """
+    if IS_WINDOWS:
+        return {
+            "success": False,
+            "confirmation": "Prompting an existing terminal is not wired up on Windows yet, sir.",
+        }
+
     escaped_name = project_name.replace('"', '\\"')
     escaped_prompt = prompt.replace("\\", "\\\\").replace('"', '\\"')
 
@@ -346,6 +706,11 @@ async def execute_action(intent: dict, projects: list = None) -> dict:
 
     if action == "open_terminal":
         result = await open_terminal("claude --dangerously-skip-permissions")
+        result["project_dir"] = None
+        return result
+
+    elif action == "open_app":
+        result = await open_app(target)
         result["project_dir"] = None
         return result
 

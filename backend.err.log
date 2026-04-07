@@ -1,0 +1,26 @@
+INFO:     Started server process [15032]
+INFO:     Waiting for application startup.
+2026-04-07 22:56:08,069 [jarvis] Context refresh thread started
+2026-04-07 22:56:08,071 [jarvis] JARVIS server starting
+INFO:     Application startup complete.
+INFO:     Uvicorn running on https://0.0.0.0:8340 (Press CTRL+C to quit)
+INFO:     127.0.0.1:63468 - "WebSocket /ws/voice" [accepted]
+2026-04-07 22:56:10,672 [jarvis] Voice WebSocket connected
+INFO:     connection open
+INFO:     127.0.0.1:62888 - "WebSocket /ws/voice" [accepted]
+2026-04-07 22:56:11,001 [jarvis] Voice WebSocket connected
+INFO:     connection open
+2026-04-07 22:56:12,369 [httpx] HTTP Request: POST https://api.fish.audio/v1/tts "HTTP/1.1 200 OK"
+2026-04-07 22:56:12,393 [jarvis] JARVIS: Good evening, sir.
+2026-04-07 22:56:13,394 [jarvis.calendar] Failed to launch Calendar: [WinError 2] The system cannot find the file specified
+2026-04-07 22:56:13,583 [jarvis.calendar] Calendar cache refreshed: 0 events today (0.2s)
+2026-04-07 22:56:13,612 [jarvis.mail] Failed to launch Mail: [WinError 2] The system cannot find the file specified
+2026-04-07 22:56:13,750 [jarvis.mail] Mail script error: [WinError 2] The system cannot find the file specified
+2026-04-07 22:56:13,997 [jarvis.notes] Notes script error: [WinError 2] The system cannot find the file specified
+2026-04-07 22:56:14,067 [jarvis.mail] Failed to launch Mail: [WinError 2] The system cannot find the file specified
+2026-04-07 22:56:14,248 [jarvis.mail] Mail script error: [WinError 2] The system cannot find the file specified
+2026-04-07 22:56:14,500 [jarvis.notes] Notes script error: [WinError 2] The system cannot find the file specified
+2026-04-07 22:56:18,987 [jarvis] Voice WebSocket disconnected
+INFO:     connection closed
+2026-04-07 22:56:48,954 [jarvis] Announcement via JARVIS (codex): Update dari Codex: jembatan suara JARVIS sekarang aktif, sir.
+2026-04-07 22:56:50,776 [httpx] HTTP Request: POST https://api.fish.audio/v1/tts "HTTP/1.1 200 OK"

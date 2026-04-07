@@ -12,8 +12,11 @@ JARVIS reads the responses via subprocess, summarizes, and reports back.
 import asyncio
 import json
 import logging
+import os
 import shutil
 from pathlib import Path
+
+from actions import handoff_to_codex, should_use_codex_delegate
 
 log = logging.getLogger("jarvis.work_mode")
 
@@ -61,6 +64,22 @@ class WorkSession:
         First message in a session: fresh claude -p
         Subsequent messages: claude -p --continue (resumes last session in dir)
         """
+        if should_use_codex_delegate():
+            self._status = "working"
+            try:
+                result = await handoff_to_codex(
+                    self._working_dir,
+                    user_text,
+                    self._project_name,
+                )
+                self._message_count += 1
+                self._status = "done" if result["success"] else "error"
+                return result["confirmation"]
+            except Exception as e:
+                log.error(f"Codex handoff error: {e}")
+                self._status = "error"
+                return f"Something went wrong preparing the Codex handoff, sir: {str(e)[:100]}"
+
         claude_path = shutil.which("claude")
         if not claude_path:
             return "Claude CLI not found on this system."

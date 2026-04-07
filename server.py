@@ -39,7 +39,19 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-from actions import execute_action, monitor_build, open_terminal, open_browser, open_claude_in_project, _generate_project_name, prompt_existing_terminal
+from actions import (
+    execute_action,
+    monitor_build,
+    open_terminal,
+    open_browser,
+    open_app,
+    handoff_to_codex,
+    open_claude_in_project,
+    _generate_project_name,
+    prompt_existing_terminal,
+    normalize_desktop_app_name,
+    should_use_codex_delegate,
+)
 from work_mode import WorkSession, is_casual_question
 from screen import get_active_windows, take_screenshot, describe_screen, format_windows_for_context
 from calendar_access import get_todays_events, get_upcoming_events, get_next_event, format_events_for_context, format_schedule_summary, refresh_cache as refresh_calendar_cache
@@ -100,6 +112,7 @@ You ARE the JARVIS project at {project_dir} on {user_name}'s computer. Your code
 YOUR CAPABILITIES (these are REAL and ACTIVE — you CAN do all of these RIGHT NOW):
 - You CAN open Terminal.app via AppleScript
 - You CAN open Google Chrome and browse any URL or search query
+- You CAN open desktop applications like Obsidian, Chrome, File Explorer, and terminal tools when the current system supports them
 - You CAN spawn Claude Code in a Terminal window for coding tasks
 - You CAN create project folders on the Desktop
 - You CAN check Desktop projects and their git status
@@ -185,6 +198,7 @@ When you decide the user needs something DONE (not just discussed), include an a
 - [ACTION:SCREEN] — capture and describe what's visible on the user's screen. Use when user says "look at my screen", "what's running", "what do you see", etc. Do NOT use PROMPT_PROJECT for screen requests.
 - [ACTION:BUILD] description — when user wants a project built. Claude Code does the work.
 - [ACTION:BROWSE] url or search query — when user wants to see a webpage or search result in Chrome
+- [ACTION:OPEN_APP] app name — when user wants a desktop app opened, such as Obsidian or File Explorer
 - [ACTION:RESEARCH] detailed research brief — when user wants real research with real data. Claude Code will browse the web, find real listings/data, and create a report document. Give it a detailed brief of what to find.
 - [ACTION:OPEN_TERMINAL] — when user just wants a fresh Claude Code terminal with no specific project
 CRITICAL: When the user asks about their SCREEN, what's RUNNING, or what they're LOOKING AT — ALWAYS use [ACTION:SCREEN] or let the fast action system handle it. NEVER use [ACTION:PROMPT_PROJECT] for screen requests. PROMPT_PROJECT is ONLY for working on code projects.
@@ -616,6 +630,9 @@ STT_CORRECTIONS = {
     r"\bquad code\b": "Claude Code",
     r"\bclawed code\b": "Claude Code",
     r"\bclod code\b": "Claude Code",
+    r"\bcode x\b": "Codex",
+    r"\bcodec\b": "Codex",
+    r"\bcodexx\b": "Codex",
     r"\bcloud\b": "Claude",
     r"\bquad\b": "Claude",
     r"\btravis\b": "JARVIS",
@@ -738,7 +755,7 @@ def extract_action(response: str) -> tuple[str, dict | None]:
     Returns (clean_text_for_tts, action_dict_or_none).
     """
     match = _action_re.search(
-        r'\[ACTION:(BUILD|BROWSE|RESEARCH|OPEN_TERMINAL|PROMPT_PROJECT|ADD_TASK|ADD_NOTE|COMPLETE_TASK|REMEMBER|CREATE_NOTE|READ_NOTE|SCREEN)\]\s*(.*?)$',
+        r'\[ACTION:(BUILD|BROWSE|OPEN_APP|RESEARCH|OPEN_TERMINAL|PROMPT_PROJECT|ADD_TASK|ADD_NOTE|COMPLETE_TASK|REMEMBER|CREATE_NOTE|READ_NOTE|SCREEN)\]\s*(.*?)$',
         response, _action_re.DOTALL,
     )
     if match:
@@ -767,6 +784,14 @@ async def _execute_browse(target: str):
             await open_browser(f"https://www.google.com/search?q={quote(target)}")
     except Exception as e:
         log.error(f"Browse execution failed: {e}")
+
+
+async def _execute_open_app(target: str):
+    """Execute a desktop app open request from an LLM-embedded [ACTION:OPEN_APP] tag."""
+    try:
+        await open_app(target)
+    except Exception as e:
+        log.error(f"Open app failed: {e}")
 
 
 async def _execute_research(target: str, ws=None):
@@ -1250,6 +1275,39 @@ def get_usage_summary() -> str:
 
     return " ".join(parts)
 
+
+async def announce_via_jarvis_voice(text: str, source: str = "external") -> dict:
+    """Broadcast an announcement through any connected JARVIS voice clients."""
+    clean_text = text.strip()
+    listener_count = len(task_manager._websockets)
+    if not clean_text:
+        return {"success": False, "delivered": False, "listeners": listener_count, "error": "Empty text"}
+    if listener_count == 0:
+        log.info(f"Announcement queued nowhere ({source}) — no active listeners")
+        return {"success": False, "delivered": False, "listeners": 0, "error": "No active JARVIS voice clients"}
+
+    log.info(f"Announcement via JARVIS ({source}): {clean_text[:160]}")
+    tts = strip_markdown_for_tts(clean_text)
+    audio = await synthesize_speech(tts)
+
+    await task_manager._notify({"type": "status", "state": "speaking"})
+    if audio:
+        await task_manager._notify({
+            "type": "audio",
+            "data": base64.b64encode(audio).decode(),
+            "text": clean_text,
+            "source": source,
+        })
+    else:
+        await task_manager._notify({
+            "type": "text",
+            "text": clean_text,
+            "source": source,
+        })
+    await task_manager._notify({"type": "status", "state": "idle"})
+
+    return {"success": True, "delivered": True, "listeners": listener_count}
+
 # Background context cache — never blocks responses
 _ctx_cache = {
     "screen": "",
@@ -1472,6 +1530,10 @@ def detect_action_fast(text: str) -> dict | None:
     if any(w in t for w in ["open claude", "start claude", "launch claude", "run claude"]):
         return {"action": "open_terminal"}
 
+    app_target = normalize_desktop_app_name(t)
+    if app_target:
+        return {"action": "open_app", "target": app_target}
+
     # Show recent build
     if any(w in t for w in ["show me what you built", "pull up what you made", "open what you built"]):
         return {"action": "show_recent"}
@@ -1525,10 +1587,20 @@ async def handle_open_terminal() -> str:
     return result["confirmation"]
 
 
+async def handle_open_app(target: str) -> str:
+    result = await open_app(target)
+    return result["confirmation"]
+
+
 async def handle_build(target: str) -> str:
     name = _generate_project_name(target)
     path = str(Path.home() / "Desktop" / name)
     os.makedirs(path, exist_ok=True)
+
+    if should_use_codex_delegate():
+        result = await handoff_to_codex(path, target, name)
+        recently_built.append({"name": name, "path": path, "time": time.time()})
+        return result["confirmation"]
 
     # Write CLAUDE.md with clear instructions
     claude_md = Path(path) / "CLAUDE.md"
@@ -2111,6 +2183,8 @@ async def voice_handler(ws: WebSocket):
                     if action:
                         if action["action"] == "open_terminal":
                             response_text = await handle_open_terminal()
+                        elif action["action"] == "open_app":
+                            response_text = await handle_open_app(action["target"])
                         elif action["action"] == "show_recent":
                             response_text = await handle_show_recent()
                         elif action["action"] == "describe_screen":
@@ -2169,6 +2243,8 @@ async def voice_handler(ws: WebSocket):
                                         response_text = f"Connecting to {proj} now, sir."
                                     elif action_type == "build":
                                         response_text = "On it, sir."
+                                    elif action_type == "open_app":
+                                        response_text = "Opening that now, sir."
                                     elif action_type == "research":
                                         response_text = "Looking into that now, sir."
                                     else:
@@ -2204,6 +2280,8 @@ async def voice_handler(ws: WebSocket):
                                     )
                                 elif embedded_action["action"] == "browse":
                                     asyncio.create_task(_execute_browse(embedded_action["target"]))
+                                elif embedded_action["action"] == "open_app":
+                                    asyncio.create_task(_execute_open_app(embedded_action["target"]))
                                 elif embedded_action["action"] == "research":
                                     # Research enters work mode too
                                     name = _generate_project_name(embedded_action["target"])
@@ -2406,6 +2484,10 @@ class KeyUpdate(BaseModel):
 class KeyTest(BaseModel):
     key_value: str | None = None
 
+class AnnouncementRequest(BaseModel):
+    text: str
+    source: str = "external"
+
 class PreferencesUpdate(BaseModel):
     user_name: str = ""
     honorific: str = "sir"
@@ -2413,7 +2495,7 @@ class PreferencesUpdate(BaseModel):
 
 @app.post("/api/settings/keys")
 async def api_settings_keys(body: KeyUpdate):
-    allowed = {"ANTHROPIC_API_KEY", "FISH_API_KEY", "FISH_VOICE_ID", "USER_NAME", "HONORIFIC", "CALENDAR_ACCOUNTS"}
+    allowed = {"ANTHROPIC_API_KEY", "FISH_API_KEY", "FISH_VOICE_ID", "USER_NAME", "HONORIFIC", "CALENDAR_ACCOUNTS", "DEV_AGENT"}
     if body.key_name not in allowed:
         return JSONResponse({"success": False, "error": "Invalid key name"}, status_code=400)
     _write_env_key(body.key_name, body.key_value)
@@ -2452,11 +2534,21 @@ async def api_test_fish(body: KeyTest):
     except Exception as e:
         return {"valid": False, "error": str(e)[:200]}
 
+@app.post("/api/announce")
+async def api_announce(body: AnnouncementRequest):
+    if not body.text.strip():
+        return JSONResponse({"success": False, "error": "Announcement text is empty"}, status_code=400)
+    result = await announce_via_jarvis_voice(body.text, body.source)
+    if not result["success"]:
+        return JSONResponse(result, status_code=409 if result.get("error") == "No active JARVIS voice clients" else 400)
+    return result
+
 @app.get("/api/settings/status")
 async def api_settings_status():
     import shutil as _shutil
     _, env_dict = _read_env()
     claude_installed = _shutil.which("claude") is not None
+    codex_delegate = env_dict.get("DEV_AGENT", "").strip() or ("codex" if os.name == "nt" else "claude")
     calendar_ok = mail_ok = notes_ok = False
     try: await get_todays_events(); calendar_ok = True
     except Exception: pass
@@ -2471,6 +2563,7 @@ async def api_settings_status():
     except Exception: pass
     return {
         "claude_code_installed": claude_installed,
+        "dev_agent": codex_delegate,
         "calendar_accessible": calendar_ok,
         "mail_accessible": mail_ok,
         "notes_accessible": notes_ok,
@@ -2482,6 +2575,7 @@ async def api_settings_status():
             "anthropic": bool(env_dict.get("ANTHROPIC_API_KEY", "").strip() and env_dict.get("ANTHROPIC_API_KEY", "") != "your-anthropic-api-key-here"),
             "fish_audio": bool(env_dict.get("FISH_API_KEY", "").strip() and env_dict.get("FISH_API_KEY", "") != "your-fish-audio-api-key-here"),
             "fish_voice_id": bool(env_dict.get("FISH_VOICE_ID", "").strip()),
+            "dev_agent": codex_delegate,
             "user_name": env_dict.get("USER_NAME", ""),
         },
     }
