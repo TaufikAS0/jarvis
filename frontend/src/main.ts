@@ -18,6 +18,7 @@ import "./style.css";
 type State = "idle" | "listening" | "thinking" | "speaking";
 let currentState: State = "idle";
 let isMuted = false;
+let isSocketConnected = false;
 
 const statusEl = document.getElementById("status-text")!;
 const errorEl = document.getElementById("error-text")!;
@@ -28,6 +29,11 @@ function showError(msg: string) {
   setTimeout(() => {
     errorEl.style.opacity = "0";
   }, 5000);
+}
+
+function clearError() {
+  errorEl.textContent = "";
+  errorEl.style.opacity = "0";
 }
 
 function updateStatus(state: State) {
@@ -82,6 +88,10 @@ function transition(newState: State) {
 
 const voiceInput = createVoiceInput(
   (text: string) => {
+    if (!isSocketConnected) {
+      showError("JARVIS is reconnecting. Please wait a moment.");
+      return;
+    }
     // Cancel any current JARVIS response before sending new input
     audioPlayer.stop();
     // User spoke — send transcript
@@ -92,6 +102,25 @@ const voiceInput = createVoiceInput(
     showError(msg);
   }
 );
+
+socket.onConnectionChange((connected) => {
+  isSocketConnected = connected;
+
+  if (!connected) {
+    audioPlayer.stop();
+    transition("idle");
+    statusEl.textContent = "reconnecting...";
+    showError("Connection to JARVIS lost. Reconnecting...");
+    return;
+  }
+
+  clearError();
+  if (isMuted) {
+    transition("idle");
+  } else {
+    transition("listening");
+  }
+});
 
 // ---------------------------------------------------------------------------
 // Audio playback finished

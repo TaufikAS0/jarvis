@@ -1,26 +1,56 @@
-INFO:     Started server process [15032]
+INFO:     Started server process [36572]
 INFO:     Waiting for application startup.
-2026-04-07 22:56:08,069 [jarvis] Context refresh thread started
-2026-04-07 22:56:08,071 [jarvis] JARVIS server starting
+2026-04-07 23:07:59,790 [jarvis] Context refresh thread started
+2026-04-07 23:07:59,794 [jarvis] JARVIS server starting
 INFO:     Application startup complete.
 INFO:     Uvicorn running on https://0.0.0.0:8340 (Press CTRL+C to quit)
-INFO:     127.0.0.1:63468 - "WebSocket /ws/voice" [accepted]
-2026-04-07 22:56:10,672 [jarvis] Voice WebSocket connected
+INFO:     127.0.0.1:64353 - "WebSocket /ws/voice" [accepted]
+2026-04-07 23:08:02,259 [jarvis] Voice WebSocket connected
 INFO:     connection open
-INFO:     127.0.0.1:62888 - "WebSocket /ws/voice" [accepted]
-2026-04-07 22:56:11,001 [jarvis] Voice WebSocket connected
+INFO:     127.0.0.1:58408 - "WebSocket /ws/voice" [accepted]
+2026-04-07 23:08:02,829 [jarvis] Voice WebSocket connected
 INFO:     connection open
-2026-04-07 22:56:12,369 [httpx] HTTP Request: POST https://api.fish.audio/v1/tts "HTTP/1.1 200 OK"
-2026-04-07 22:56:12,393 [jarvis] JARVIS: Good evening, sir.
-2026-04-07 22:56:13,394 [jarvis.calendar] Failed to launch Calendar: [WinError 2] The system cannot find the file specified
-2026-04-07 22:56:13,583 [jarvis.calendar] Calendar cache refreshed: 0 events today (0.2s)
-2026-04-07 22:56:13,612 [jarvis.mail] Failed to launch Mail: [WinError 2] The system cannot find the file specified
-2026-04-07 22:56:13,750 [jarvis.mail] Mail script error: [WinError 2] The system cannot find the file specified
-2026-04-07 22:56:13,997 [jarvis.notes] Notes script error: [WinError 2] The system cannot find the file specified
-2026-04-07 22:56:14,067 [jarvis.mail] Failed to launch Mail: [WinError 2] The system cannot find the file specified
-2026-04-07 22:56:14,248 [jarvis.mail] Mail script error: [WinError 2] The system cannot find the file specified
-2026-04-07 22:56:14,500 [jarvis.notes] Notes script error: [WinError 2] The system cannot find the file specified
-2026-04-07 22:56:18,987 [jarvis] Voice WebSocket disconnected
+2026-04-07 23:08:04,077 [httpx] HTTP Request: POST https://api.fish.audio/v1/tts "HTTP/1.1 200 OK"
+2026-04-07 23:08:04,095 [jarvis] JARVIS: Good evening, sir.
+2026-04-07 23:08:05,116 [jarvis.calendar] Failed to launch Calendar: [WinError 2] The system cannot find the file specified
+2026-04-07 23:08:05,316 [jarvis.calendar] Calendar cache refreshed: 0 events today (0.2s)
+2026-04-07 23:08:05,336 [jarvis.mail] Failed to launch Mail: [WinError 2] The system cannot find the file specified
+2026-04-07 23:08:05,507 [jarvis.mail] Mail script error: [WinError 2] The system cannot find the file specified
+2026-04-07 23:08:05,693 [jarvis.notes] Notes script error: [WinError 2] The system cannot find the file specified
+2026-04-07 23:08:05,813 [jarvis.mail] Failed to launch Mail: [WinError 2] The system cannot find the file specified
+2026-04-07 23:08:05,961 [jarvis.mail] Mail script error: [WinError 2] The system cannot find the file specified
+2026-04-07 23:08:06,179 [jarvis.notes] Notes script error: [WinError 2] The system cannot find the file specified
+2026-04-07 23:08:14,384 [jarvis] Voice WebSocket disconnected
 INFO:     connection closed
-2026-04-07 22:56:48,954 [jarvis] Announcement via JARVIS (codex): Update dari Codex: jembatan suara JARVIS sekarang aktif, sir.
-2026-04-07 22:56:50,776 [httpx] HTTP Request: POST https://api.fish.audio/v1/tts "HTTP/1.1 200 OK"
+INFO:     127.0.0.1:53118 - "WebSocket /ws/voice" [accepted]
+2026-04-07 23:08:37,616 [jarvis] Voice WebSocket connected
+INFO:     connection open
+2026-04-07 23:08:39,684 [jarvis.mail] Failed to launch Mail: [WinError 2] The system cannot find the file specified
+2026-04-07 23:08:39,846 [jarvis.mail] Mail script error: [WinError 2] The system cannot find the file specified
+2026-04-07 23:08:40,057 [jarvis.notes] Notes script error: [WinError 2] The system cannot find the file specified
+2026-04-07 23:09:57,030 [jarvis] Voice WebSocket disconnected
+INFO:     connection closed
+2026-04-07 23:10:02,127 [jarvis] User: your face can you hear me
+2026-04-07 23:10:02,127 [jarvis] Scanned 0 projects
+2026-04-07 23:10:03,277 [httpx] HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+2026-04-07 23:10:04,756 [httpx] HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+2026-04-07 23:10:06,050 [httpx] HTTP Request: POST https://api.fish.audio/v1/tts "HTTP/1.1 200 OK"
+2026-04-07 23:10:06,277 [jarvis] JARVIS: Good evening, sir — yes, quite clearly. The system is operational.
+2026-04-07 23:10:18,850 [jarvis] User: can you open contacts for me
+2026-04-07 23:10:18,850 [jarvis] Scanned 0 projects
+2026-04-07 23:10:20,240 [httpx] HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+2026-04-07 23:10:20,244 [jarvis] LLM embedded action: {'action': 'screen', 'target': ''}
+2026-04-07 23:10:20,558 [jarvis.screen] Screenshot error: [WinError 2] The system cannot find the file specified
+2026-04-07 23:10:20,913 [jarvis.screen] get_active_windows error: [WinError 2] The system cannot find the file specified
+2026-04-07 23:10:20,950 [jarvis.screen] get_running_apps error: [WinError 2] The system cannot find the file specified
+2026-04-07 23:10:20,958 [jarvis] Skipping lookup audio for screen — user spoke recently
+2026-04-07 23:10:20,959 [jarvis] Lookup screen complete: I wasn't able to see your screen, sir. Screen recording permission may be needed
+2026-04-07 23:10:23,416 [httpx] HTTP Request: POST https://api.fish.audio/v1/tts "HTTP/1.1 200 OK"
+2026-04-07 23:10:23,704 [jarvis] JARVIS: I'm afraid that's beyond my current reach, sir — the Contacts app isn't in my available toolkit at the moment.
+2026-04-07 23:10:24,553 [httpx] HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+2026-04-07 23:10:39,367 [jarvis] User: can you open the Acadia
+2026-04-07 23:10:39,374 [jarvis] Scanned 0 projects
+2026-04-07 23:10:40,522 [httpx] HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+2026-04-07 23:10:42,537 [httpx] HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+2026-04-07 23:10:44,840 [httpx] HTTP Request: POST https://api.fish.audio/v1/tts "HTTP/1.1 200 OK"
+2026-04-07 23:10:45,157 [jarvis] JARVIS: I'm afraid I don't have that information, sir — is Acadia an application, a file, or a project folder you'd like me to locate?
