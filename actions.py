@@ -18,6 +18,11 @@ log = logging.getLogger("jarvis.actions")
 
 DESKTOP_PATH = Path.home() / "Desktop"
 IS_WINDOWS = os.name == "nt"
+OBSIDIAN_CONFIG_PATH = Path(os.environ.get("APPDATA", "")) / "Obsidian" / "obsidian.json"
+OBSIDIAN_JARVIS_NOTE_CANDIDATES = [
+    "Codex Skills/Skills/jarvis-launcher.md",
+    "jarvis-launcher.md",
+]
 
 _WINDOWS_BROWSER_PATHS = {
     "chrome": [
@@ -30,6 +35,8 @@ _WINDOWS_BROWSER_PATHS = {
     ],
 }
 CODEX_WINDOWS_APP_ID = "OpenAI.Codex_2p2nqsd0c76g0!App"
+SPOTIFY_WINDOWS_APP_ID = "SpotifyAB.SpotifyMusic_zpdnekdrzrea0!Spotify"
+JARVIS_SHOW_LAUNCHER = Path(r"C:\Users\ASUS\.codex\skills\jarvis-launcher\scripts\launch_stark_show.ps1")
 
 _APP_SPECS = {
     "obsidian": {
@@ -100,6 +107,16 @@ _APP_SPECS = {
         "darwin_app": "Google Chrome",
         "confirmation": "Opened Chrome, sir.",
     },
+    "spotify": {
+        "aliases": {
+            "spotify",
+            "spotify app",
+            "music app",
+        },
+        "windows_app_id": SPOTIFY_WINDOWS_APP_ID,
+        "windows_protocol": "spotify:",
+        "confirmation": "Opened Spotify, sir.",
+    },
     "codex": {
         "aliases": {
             "codex",
@@ -109,6 +126,17 @@ _APP_SPECS = {
         },
         "windows_app_id": CODEX_WINDOWS_APP_ID,
         "confirmation": "Opened Codex, sir.",
+    },
+    "jarvis": {
+        "aliases": {
+            "jarvis",
+            "open jarvis",
+            "show jarvis",
+            "buka jarvis",
+            "jarvis launcher",
+            "jarvis skill",
+        },
+        "confirmation": "Opened JARVIS in Obsidian, sir.",
     },
 }
 
@@ -130,6 +158,148 @@ def _first_existing_path(paths: list[str]) -> str | None:
     return None
 
 
+def _get_primary_obsidian_vault() -> tuple[str, str] | None:
+    """Return (vault_name, vault_path) for the currently configured Obsidian vault."""
+    try:
+        if not OBSIDIAN_CONFIG_PATH.exists():
+            return None
+        data = json.loads(OBSIDIAN_CONFIG_PATH.read_text(encoding="utf-8"))
+        vaults = data.get("vaults", {})
+        if not vaults:
+            return None
+        preferred = None
+        for vault in vaults.values():
+            if vault.get("open"):
+                preferred = vault
+                break
+        if preferred is None:
+            preferred = next(iter(vaults.values()))
+        vault_path = preferred.get("path", "").strip()
+        if not vault_path:
+            return None
+        vault_name = Path(vault_path).name
+        return vault_name, vault_path
+    except Exception:
+        return None
+
+
+def _find_obsidian_jarvis_note() -> tuple[str, str, str] | None:
+    """Return (vault_name, vault_path, relative_note_path) for the JARVIS launcher note."""
+    vault = _get_primary_obsidian_vault()
+    if not vault:
+        return None
+    vault_name, vault_path = vault
+    vault_root = Path(vault_path)
+    for rel_path in OBSIDIAN_JARVIS_NOTE_CANDIDATES:
+        if (vault_root / rel_path).exists():
+            return vault_name, vault_path, rel_path.replace("\\", "/")
+
+    fallback = next(vault_root.rglob("jarvis-launcher.md"), None)
+    if fallback:
+        rel = fallback.relative_to(vault_root).as_posix()
+        return vault_name, vault_path, rel
+    return None
+
+
+async def _maximize_windows_process(process_name: str, timeout_seconds: int = 8) -> None:
+    """Bring a Windows app to the foreground and maximize it."""
+    if not IS_WINDOWS:
+        return
+    script = f"""
+$signature = @'
+using System;
+using System.Runtime.InteropServices;
+public static class WinApi {{
+    [DllImport("user32.dll")] public static extern bool ShowWindowAsync(IntPtr hWnd, int nCmdShow);
+    [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
+}}
+'@
+Add-Type -TypeDefinition $signature -ErrorAction SilentlyContinue | Out-Null
+$deadline = (Get-Date).AddSeconds({timeout_seconds})
+do {{
+    $proc = Get-Process -Name { _ps_quote(process_name) } -ErrorAction SilentlyContinue | Where-Object {{ $_.MainWindowHandle -ne 0 }} | Select-Object -First 1
+    if ($proc) {{
+        [WinApi]::ShowWindowAsync($proc.MainWindowHandle, 3) | Out-Null
+        [WinApi]::SetForegroundWindow($proc.MainWindowHandle) | Out-Null
+        exit 0
+    }}
+    Start-Sleep -Milliseconds 300
+}} while ((Get-Date) -lt $deadline)
+exit 0
+"""
+    proc = await asyncio.create_subprocess_exec(
+        "powershell",
+        "-NoProfile",
+        "-Command",
+        script,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    await proc.communicate()
+
+
+async def _open_jarvis_obsidian_note() -> dict:
+    """Open the JARVIS launcher note in Obsidian and maximize the window."""
+    note_info = _find_obsidian_jarvis_note()
+    if not note_info:
+        return {
+            "success": False,
+            "confirmation": "I couldn't find the JARVIS note in your Obsidian vault, sir.",
+        }
+
+    vault_name, _, rel_path = note_info
+    uri = f"obsidian://open?vault={quote(vault_name, safe='')}&file={quote(rel_path, safe='')}"
+
+    obsidian_path = _first_existing_path([
+        str(Path.home() / "AppData" / "Local" / "Programs" / "Obsidian" / "Obsidian.exe"),
+        r"C:\Program Files\Obsidian\Obsidian.exe",
+        r"C:\Program Files (x86)\Obsidian\Obsidian.exe",
+    ])
+
+    if obsidian_path:
+        success, detail = await _start_windows_process(obsidian_path, [uri])
+    else:
+        success, detail = await _start_windows_process(uri)
+
+    if success:
+        await _maximize_windows_process("Obsidian")
+    elif detail:
+        log.error(f"open_jarvis_obsidian_note failed: {detail}")
+
+    return {
+        "success": success,
+        "confirmation": "Opened JARVIS in Obsidian and maximized it, sir."
+        if success
+        else "I had trouble opening the JARVIS note in Obsidian, sir.",
+    }
+
+
+async def run_jarvis_show() -> dict:
+    """Run the packaged JARVIS launcher show, including the local website."""
+    if not JARVIS_SHOW_LAUNCHER.exists():
+        return {
+            "success": False,
+            "confirmation": "I couldn't find the packaged JARVIS launcher, sir.",
+        }
+
+    success, detail = await _start_windows_process(
+        "powershell.exe",
+        [
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(JARVIS_SHOW_LAUNCHER),
+        ],
+    )
+    if not success and detail:
+        log.error(f"run_jarvis_show failed: {detail}")
+    return {
+        "success": success,
+        "confirmation": "Launched the full JARVIS show, sir." if success else "I had trouble starting the JARVIS show, sir.",
+    }
+
+
 def get_dev_agent_mode() -> str:
     """Return the configured coding agent mode."""
     mode = os.getenv("DEV_AGENT", "").strip().lower()
@@ -141,6 +311,37 @@ def get_dev_agent_mode() -> str:
 def should_use_codex_delegate() -> bool:
     """True when JARVIS should hand coding work to Codex on this machine."""
     return IS_WINDOWS and get_dev_agent_mode() in {"auto", "codex", "codex_handoff"}
+
+
+def extract_spotify_query(text: str) -> str | None:
+    """Extract a song request from a short Spotify/music command."""
+    original = re.sub(r"\s+", " ", text.strip())
+    lowered = original.lower()
+    if not lowered:
+        return None
+
+    patterns = [
+        r"^(?:open|buka)\s+spotify\s+(?:and\s+play|dan\s+putar(?:kan)?|dan\s+mainkan)\s+(.+)$",
+        r"^spotify\s+(?:play|putar(?:kan)?|mainkan)\s+(.+)$",
+        r"^(?:play|putar(?:kan)?|mainkan)\s+(.+?)\s+(?:on|in|di|dari|from)\s+spotify$",
+        r"^(?:play|putar(?:kan)?|mainkan)\s+(.+)$",
+    ]
+
+    for pattern in patterns:
+        match = re.match(pattern, lowered, flags=re.IGNORECASE)
+        if not match:
+            continue
+        query = original[match.start(1):match.end(1)].strip(" .,!?'\"")
+        query = re.sub(r"\s+", " ", query)
+        if not query:
+            return None
+        if query.lower() in {"spotify", "music", "lagu", "song"}:
+            return None
+        if "spotify" not in lowered and len(query.split()) < 3:
+            return None
+        return query
+
+    return None
 
 
 def normalize_desktop_app_name(text: str) -> str | None:
@@ -190,6 +391,69 @@ async def _start_windows_process(file_path: str, arguments: list[str] | None = N
     )
     stdout, stderr = await proc.communicate()
     return proc.returncode == 0, (stderr or stdout).decode(errors="ignore").strip()
+
+
+async def _click_spotify_first_song(timeout_seconds: int = 8) -> tuple[bool, str]:
+    """Click the first song result in Spotify search on this Windows layout."""
+    if not IS_WINDOWS:
+        return False, "Spotify click automation is only available on Windows"
+
+    script = f"""
+$signature = @'
+using System;
+using System.Runtime.InteropServices;
+public static class WinApi {{
+    [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
+    [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hWnd, out RECT rect);
+    [DllImport("user32.dll")] public static extern bool SetCursorPos(int X, int Y);
+    [DllImport("user32.dll")] public static extern bool GetCursorPos(out POINT point);
+    [DllImport("user32.dll")] public static extern void mouse_event(uint dwFlags, uint dx, uint dy, uint dwData, UIntPtr dwExtraInfo);
+    public struct RECT {{ public int Left; public int Top; public int Right; public int Bottom; }}
+    public struct POINT {{ public int X; public int Y; }}
+}}
+'@
+Add-Type -TypeDefinition $signature -ErrorAction SilentlyContinue | Out-Null
+$deadline = (Get-Date).AddSeconds({timeout_seconds})
+do {{
+    $proc = Get-Process -Name 'Spotify' -ErrorAction SilentlyContinue | Where-Object {{ $_.MainWindowHandle -ne 0 }} | Select-Object -First 1
+    if ($proc) {{
+        [WinApi]::SetForegroundWindow($proc.MainWindowHandle) | Out-Null
+        Start-Sleep -Milliseconds 250
+        $rect = New-Object WinApi+RECT
+        [WinApi]::GetWindowRect($proc.MainWindowHandle, [ref]$rect) | Out-Null
+        $x = [Math]::Min($rect.Right - 120, $rect.Left + 270)
+        $y = [Math]::Min($rect.Bottom - 90, $rect.Top + 700)
+        $original = New-Object WinApi+POINT
+        [WinApi]::GetCursorPos([ref]$original) | Out-Null
+        [WinApi]::SetCursorPos($x, $y) | Out-Null
+        Start-Sleep -Milliseconds 250
+        $down = 0x0002
+        $up = 0x0004
+        [WinApi]::mouse_event($down, 0, 0, 0, [UIntPtr]::Zero)
+        [WinApi]::mouse_event($up, 0, 0, 0, [UIntPtr]::Zero)
+        Start-Sleep -Milliseconds 120
+        [WinApi]::mouse_event($down, 0, 0, 0, [UIntPtr]::Zero)
+        [WinApi]::mouse_event($up, 0, 0, 0, [UIntPtr]::Zero)
+        Start-Sleep -Milliseconds 150
+        [WinApi]::SetCursorPos($original.X, $original.Y) | Out-Null
+        exit 0
+    }}
+    Start-Sleep -Milliseconds 300
+}} while ((Get-Date) -lt $deadline)
+Write-Error 'Spotify window not ready'
+exit 1
+"""
+    proc = await asyncio.create_subprocess_exec(
+        "powershell",
+        "-NoProfile",
+        "-Command",
+        script,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, stderr = await proc.communicate()
+    detail = (stderr or stdout).decode(errors="ignore").strip()
+    return proc.returncode == 0, detail
 
 
 async def _mark_terminal_as_jarvis(revert_after: float = 5.0):
@@ -355,9 +619,60 @@ async def open_chrome(url: str) -> dict:
     return await open_browser(url, "chrome")
 
 
+async def play_spotify(query: str) -> dict:
+    """Open Spotify, search for a track, and start the first result on Windows."""
+    cleaned = re.sub(r"\s+", " ", query).strip(" .,!?'\"")
+    if not cleaned:
+        return {
+            "success": False,
+            "confirmation": "Tell me what to play on Spotify, sir.",
+        }
+
+    if not IS_WINDOWS:
+        uri = f"https://open.spotify.com/search/{quote(cleaned, safe='')}"
+        return await open_browser(uri, "chrome")
+
+    search_uri = f"spotify:search:{quote(cleaned, safe='')}"
+    success, detail = await _start_windows_process(search_uri)
+    if not success:
+        app_result = await open_app("spotify")
+        if not app_result["success"]:
+            return {
+                "success": False,
+                "confirmation": "I couldn't open Spotify on this machine, sir.",
+            }
+        await asyncio.sleep(1.2)
+        success, detail = await _start_windows_process(search_uri)
+
+    if not success:
+        if detail:
+            log.error(f"play_spotify search failed: {detail}")
+        return {
+            "success": False,
+            "confirmation": f"I had trouble searching Spotify for {cleaned}, sir.",
+        }
+
+    await asyncio.sleep(2.5)
+    click_success, click_detail = await _click_spotify_first_song()
+    if not click_success and click_detail:
+        log.warning(f"play_spotify click fallback failed: {click_detail}")
+        return {
+            "success": True,
+            "confirmation": f"Opened Spotify search for {cleaned}, sir.",
+        }
+
+    return {
+        "success": True,
+        "confirmation": f"Playing {cleaned} on Spotify, sir.",
+    }
+
+
 async def open_app(target: str) -> dict:
     """Open a supported desktop application by name."""
     app_key = normalize_desktop_app_name(target) or target.strip().lower()
+    if app_key == "jarvis":
+        return await _open_jarvis_obsidian_note()
+
     spec = _APP_SPECS.get(app_key)
     if not spec:
         return {

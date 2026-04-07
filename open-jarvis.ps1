@@ -1,3 +1,8 @@
+param(
+    [ValidateSet("fullscreen", "maximized", "windowed")]
+    [string]$WindowMode = "maximized"
+)
+
 $ErrorActionPreference = "Stop"
 
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -87,9 +92,16 @@ $chromeCandidates = @(
     "C:\Program Files (x86)\Google\Chrome\Application\chrome.exe"
 )
 
+$chromeArgs = @("http://localhost:5173")
+if ($WindowMode -eq "fullscreen") {
+    $chromeArgs = @("--new-window", "--kiosk", "http://localhost:5173")
+} elseif ($WindowMode -eq "maximized") {
+    $chromeArgs = @("--new-window", "--start-maximized", "http://localhost:5173")
+}
+
 $chrome = $chromeCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
 if ($chrome) {
-    Start-Process -FilePath $chrome -ArgumentList "http://localhost:5173" | Out-Null
+    Start-Process -FilePath $chrome -ArgumentList $chromeArgs | Out-Null
 } else {
     Start-Process "http://localhost:5173" | Out-Null
 }
@@ -97,3 +109,4 @@ if ($chrome) {
 Write-Host "JARVIS started."
 Write-Host "Frontend: http://localhost:5173"
 Write-Host "Backend: https://localhost:8340"
+Write-Host "Window mode: $WindowMode"

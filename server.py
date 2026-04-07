@@ -45,11 +45,13 @@ from actions import (
     open_terminal,
     open_browser,
     open_app,
+    play_spotify,
     handoff_to_codex,
     open_claude_in_project,
     _generate_project_name,
     prompt_existing_terminal,
     normalize_desktop_app_name,
+    extract_spotify_query,
     should_use_codex_delegate,
 )
 from work_mode import WorkSession, is_casual_question
@@ -113,6 +115,7 @@ YOUR CAPABILITIES (these are REAL and ACTIVE — you CAN do all of these RIGHT N
 - You CAN open Terminal.app via AppleScript
 - You CAN open Google Chrome and browse any URL or search query
 - You CAN open desktop applications like Obsidian, Chrome, File Explorer, and terminal tools when the current system supports them
+- You CAN open Spotify and play requested songs on the local machine when Spotify is installed
 - You CAN spawn Claude Code in a Terminal window for coding tasks
 - You CAN create project folders on the Desktop
 - You CAN check Desktop projects and their git status
@@ -199,6 +202,7 @@ When you decide the user needs something DONE (not just discussed), include an a
 - [ACTION:BUILD] description — when user wants a project built. Claude Code does the work.
 - [ACTION:BROWSE] url or search query — when user wants to see a webpage or search result in Chrome
 - [ACTION:OPEN_APP] app name — when user wants a desktop app opened, such as Obsidian or File Explorer
+- [ACTION:PLAY_SPOTIFY] song title or artist request — when user wants music started in Spotify
 - [ACTION:RESEARCH] detailed research brief — when user wants real research with real data. Claude Code will browse the web, find real listings/data, and create a report document. Give it a detailed brief of what to find.
 - [ACTION:OPEN_TERMINAL] — when user just wants a fresh Claude Code terminal with no specific project
 CRITICAL: When the user asks about their SCREEN, what's RUNNING, or what they're LOOKING AT — ALWAYS use [ACTION:SCREEN] or let the fast action system handle it. NEVER use [ACTION:PROMPT_PROJECT] for screen requests. PROMPT_PROJECT is ONLY for working on code projects.
@@ -755,7 +759,7 @@ def extract_action(response: str) -> tuple[str, dict | None]:
     Returns (clean_text_for_tts, action_dict_or_none).
     """
     match = _action_re.search(
-        r'\[ACTION:(BUILD|BROWSE|OPEN_APP|RESEARCH|OPEN_TERMINAL|PROMPT_PROJECT|ADD_TASK|ADD_NOTE|COMPLETE_TASK|REMEMBER|CREATE_NOTE|READ_NOTE|SCREEN)\]\s*(.*?)$',
+        r'\[ACTION:(BUILD|BROWSE|OPEN_APP|PLAY_SPOTIFY|RESEARCH|OPEN_TERMINAL|PROMPT_PROJECT|ADD_TASK|ADD_NOTE|COMPLETE_TASK|REMEMBER|CREATE_NOTE|READ_NOTE|SCREEN)\]\s*(.*?)$',
         response, _action_re.DOTALL,
     )
     if match:
@@ -792,6 +796,14 @@ async def _execute_open_app(target: str):
         await open_app(target)
     except Exception as e:
         log.error(f"Open app failed: {e}")
+
+
+async def _execute_play_spotify(target: str):
+    """Execute a Spotify playback request from an LLM-embedded [ACTION:PLAY_SPOTIFY] tag."""
+    try:
+        await play_spotify(target)
+    except Exception as e:
+        log.error(f"Spotify playback failed: {e}")
 
 
 async def _execute_research(target: str, ws=None):
@@ -1530,6 +1542,10 @@ def detect_action_fast(text: str) -> dict | None:
     if any(w in t for w in ["open claude", "start claude", "launch claude", "run claude"]):
         return {"action": "open_terminal"}
 
+    spotify_query = extract_spotify_query(text)
+    if spotify_query:
+        return {"action": "play_spotify", "target": spotify_query}
+
     app_target = normalize_desktop_app_name(t)
     if app_target:
         return {"action": "open_app", "target": app_target}
@@ -1589,6 +1605,11 @@ async def handle_open_terminal() -> str:
 
 async def handle_open_app(target: str) -> str:
     result = await open_app(target)
+    return result["confirmation"]
+
+
+async def handle_play_spotify(target: str) -> str:
+    result = await play_spotify(target)
     return result["confirmation"]
 
 
@@ -2185,6 +2206,8 @@ async def voice_handler(ws: WebSocket):
                             response_text = await handle_open_terminal()
                         elif action["action"] == "open_app":
                             response_text = await handle_open_app(action["target"])
+                        elif action["action"] == "play_spotify":
+                            response_text = await handle_play_spotify(action["target"])
                         elif action["action"] == "show_recent":
                             response_text = await handle_show_recent()
                         elif action["action"] == "describe_screen":
@@ -2245,6 +2268,8 @@ async def voice_handler(ws: WebSocket):
                                         response_text = "On it, sir."
                                     elif action_type == "open_app":
                                         response_text = "Opening that now, sir."
+                                    elif action_type == "play_spotify":
+                                        response_text = "Playing that now, sir."
                                     elif action_type == "research":
                                         response_text = "Looking into that now, sir."
                                     else:
@@ -2282,6 +2307,8 @@ async def voice_handler(ws: WebSocket):
                                     asyncio.create_task(_execute_browse(embedded_action["target"]))
                                 elif embedded_action["action"] == "open_app":
                                     asyncio.create_task(_execute_open_app(embedded_action["target"]))
+                                elif embedded_action["action"] == "play_spotify":
+                                    asyncio.create_task(_execute_play_spotify(embedded_action["target"]))
                                 elif embedded_action["action"] == "research":
                                     # Research enters work mode too
                                     name = _generate_project_name(embedded_action["target"])
