@@ -80,6 +80,9 @@ FISH_VOICE_ID = os.getenv("FISH_VOICE_ID", "612b878b113047d9a770c069c8b4fdfe")  
 FISH_API_URL = "https://api.fish.audio/v1/tts"
 USER_NAME = os.getenv("USER_NAME", "sir")
 PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
+JARVIS_CHAT_MODEL = os.getenv("JARVIS_CHAT_MODEL", "claude-sonnet-4-6")
+JARVIS_FAST_MODEL = os.getenv("JARVIS_FAST_MODEL", "claude-haiku-4-5-20251001")
+JARVIS_RESEARCH_MODEL = os.getenv("JARVIS_RESEARCH_MODEL", "claude-opus-4-6")
 
 DESKTOP_PATH = Path.home() / "Desktop"
 
@@ -664,7 +667,7 @@ async def classify_intent(text: str, client: anthropic.AsyncAnthropic) -> dict:
     """
     try:
         response = await client.messages.create(
-            model="claude-haiku-4-5-20251001",
+            model=JARVIS_FAST_MODEL,
             max_tokens=100,
             system=(
                 "Classify this voice command. The user is talking to JARVIS, an AI assistant that can:\n"
@@ -985,7 +988,7 @@ async def _execute_prompt_project(project_name: str, prompt: str, work_session: 
             if anthropic_client:
                 try:
                     summary = await anthropic_client.messages.create(
-                        model="claude-haiku-4-5-20251001",
+                        model=JARVIS_FAST_MODEL,
                         max_tokens=150,
                         system=(
                             "You are JARVIS reporting back on what you found or built in a project. "
@@ -1053,7 +1056,7 @@ async def self_work_and_notify(session: WorkSession, prompt: str, ws):
         if anthropic_client and full_response:
             try:
                 summary = await anthropic_client.messages.create(
-                    model="claude-haiku-4-5-20251001",
+                    model=JARVIS_FAST_MODEL,
                     max_tokens=100,
                     system="You are JARVIS. Summarize what you just completed in 1 sentence. First person — 'I built', 'I set up'. No markdown. Never say 'Claude Code'.",
                     messages=[{"role": "user", "content": f"Claude Code completed:\n{full_response[:2000]}"}],
@@ -1180,7 +1183,7 @@ async def generate_response(
 
     try:
         response = await client.messages.create(
-            model="claude-haiku-4-5-20251001",
+            model=JARVIS_CHAT_MODEL,
             max_tokens=250,  # Extra room for [ACTION:X] tags
             system=system,
             messages=messages,
@@ -1526,11 +1529,6 @@ def detect_action_fast(text: str) -> dict | None:
     to act based on conversational understanding.
     """
     t = text.lower().strip()
-    words = t.split()
-
-    # Only trigger on SHORT, clear commands (< 12 words)
-    if len(words) > 12:
-        return None  # Long messages are conversation, not commands
 
     # Screen requests — checked BEFORE project matching to prevent misrouting
     if any(p in t for p in ["look at my screen", "what's on my screen", "whats on my screen",
@@ -1545,6 +1543,12 @@ def detect_action_fast(text: str) -> dict | None:
     spotify_query = extract_spotify_query(text)
     if spotify_query:
         return {"action": "play_spotify", "target": spotify_query}
+
+    words = t.split()
+
+    # Only trigger on SHORT, clear commands (< 12 words) for non-Spotify actions
+    if len(words) > 12:
+        return None  # Long messages are conversation, not commands
 
     app_target = normalize_desktop_app_name(t)
     if app_target:
@@ -1870,7 +1874,7 @@ async def handle_research(text: str, target: str, client: anthropic.AsyncAnthrop
     """Deep research with Opus — write results to HTML, open in browser."""
     try:
         research_response = await client.messages.create(
-            model="claude-opus-4-6",
+            model=JARVIS_RESEARCH_MODEL,
             max_tokens=2000,
             system=f"You are JARVIS, researching a topic for {USER_NAME}. Be thorough, organized, and cite sources where possible.",
             messages=[{"role": "user", "content": f"Research this thoroughly:\n\n{target}"}],
@@ -1906,7 +1910,7 @@ blockquote {{ border-left: 3px solid #0ea5e9; margin-left: 0; padding-left: 16px
 
         # Short voice summary via Haiku
         summary = await client.messages.create(
-            model="claude-haiku-4-5-20251001",
+            model=JARVIS_FAST_MODEL,
             max_tokens=80,
             system="Summarize this research in ONE sentence for voice. No markdown.",
             messages=[{"role": "user", "content": research_text[:2000]}],
@@ -1939,7 +1943,7 @@ Write an updated summary in 2-4 sentences capturing the key topics, decisions, a
 
     try:
         response = await client.messages.create(
-            model="claude-haiku-4-5-20251001",
+            model=JARVIS_FAST_MODEL,
             max_tokens=200,
             messages=[{"role": "user", "content": prompt}],
         )
@@ -2179,7 +2183,7 @@ async def voice_handler(ws: WebSocket):
                         if full_response and anthropic_client:
                             try:
                                 summary = await anthropic_client.messages.create(
-                                    model="claude-haiku-4-5-20251001",
+                                    model=JARVIS_FAST_MODEL,
                                     max_tokens=100,
                                     system=(
                                         f"You are JARVIS reporting to the user ({USER_NAME}). Summarize what happened in 1-2 sentences. "
@@ -2535,7 +2539,7 @@ async def api_test_anthropic(body: KeyTest):
         return {"valid": False, "error": "No key provided"}
     try:
         client = anthropic.AsyncAnthropic(api_key=key)
-        await client.messages.create(model="claude-haiku-4-5-20251001", max_tokens=10, messages=[{"role": "user", "content": "Hi"}])
+        await client.messages.create(model=JARVIS_FAST_MODEL, max_tokens=10, messages=[{"role": "user", "content": "Hi"}])
         return {"valid": True}
     except Exception as e:
         return {"valid": False, "error": str(e)[:200]}

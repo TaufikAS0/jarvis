@@ -316,30 +316,69 @@ def should_use_codex_delegate() -> bool:
 def extract_spotify_query(text: str) -> str | None:
     """Extract a song request from a short Spotify/music command."""
     original = re.sub(r"\s+", " ", text.strip())
-    lowered = original.lower()
-    if not lowered:
+    if not original:
+        return None
+
+    normalized = original.lower()
+    normalized = re.sub(r"[!?]", " ", normalized)
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+
+    prefix_cleaners = [
+        r"^hey\s+jarvis\b[,\s]*",
+        r"^jarvis\b[,\s]*",
+        r"^(?:can you|could you|would you|will you|please|tolong|mohon|coba|bisa(?:kah)?\s+(?:tolong\s+)?)\s+",
+    ]
+    suffix_cleaners = [
+        r"\s+(?:please|dong|deh|ya|for me|buat saya|langsung)$",
+    ]
+    changed = True
+    while changed:
+        changed = False
+        for pattern in prefix_cleaners:
+            updated = re.sub(pattern, "", normalized, flags=re.IGNORECASE).strip()
+            if updated != normalized:
+                normalized = updated
+                changed = True
+        for pattern in suffix_cleaners:
+            updated = re.sub(pattern, "", normalized, flags=re.IGNORECASE).strip()
+            if updated != normalized:
+                normalized = updated
+                changed = True
+
+    if not normalized:
         return None
 
     patterns = [
-        r"^(?:open|buka)\s+spotify\s+(?:and\s+play|dan\s+putar(?:kan)?|dan\s+mainkan)\s+(.+)$",
-        r"^spotify\s+(?:play|putar(?:kan)?|mainkan)\s+(.+)$",
-        r"^(?:play|putar(?:kan)?|mainkan)\s+(.+?)\s+(?:on|in|di|dari|from)\s+spotify$",
-        r"^(?:play|putar(?:kan)?|mainkan)\s+(.+)$",
+        r"^(?:open|buka|launch|start)\s+spotify(?:\s+(?:and|dan|lalu|terus))?\s+(?:play|putar(?:kan)?|mainkan|nyalakan)\s+(?:lagu\s+)?(.+)$",
+        r"^spotify\s+(?:play|putar(?:kan)?|mainkan|nyalakan)\s+(?:lagu\s+)?(.+)$",
+        r"^(?:play|putar(?:kan)?|mainkan|nyalakan)\s+(?:lagu\s+)?(.+?)\s+(?:on|in|via|di|dari|from)\s+spotify$",
+        r"^(?:play|putar(?:kan)?|mainkan|nyalakan)\s+(?:lagu\s+)?(.+)$",
     ]
 
     for pattern in patterns:
-        match = re.match(pattern, lowered, flags=re.IGNORECASE)
+        match = re.match(pattern, normalized, flags=re.IGNORECASE)
         if not match:
             continue
-        query = original[match.start(1):match.end(1)].strip(" .,!?'\"")
+        query = match.group(1).strip(" .,!?'\"")
         query = re.sub(r"\s+", " ", query)
         if not query:
             return None
-        if query.lower() in {"spotify", "music", "lagu", "song"}:
+        if query.lower() in {"spotify", "music", "lagu", "song", "musik"}:
             return None
-        if "spotify" not in lowered and len(query.split()) < 3:
+        if "spotify" not in normalized and len(query.split()) < 2:
             return None
         return query
+
+    if "spotify" in normalized and re.search(r"\b(play|putar(?:kan)?|mainkan|nyalakan)\b", normalized):
+        fallback = re.search(
+            r"\b(?:play|putar(?:kan)?|mainkan|nyalakan)\b\s+(?:lagu\s+)?(.+?)(?:\s+(?:on|in|via|di|dari|from)\s+spotify)?$",
+            normalized,
+            flags=re.IGNORECASE,
+        )
+        if fallback:
+            query = re.sub(r"\s+", " ", fallback.group(1).strip(" .,!?'\""))
+            if query and query.lower() not in {"spotify", "music", "lagu", "song", "musik"}:
+                return query
 
     return None
 
@@ -393,49 +432,159 @@ async def _start_windows_process(file_path: str, arguments: list[str] | None = N
     return proc.returncode == 0, (stderr or stdout).decode(errors="ignore").strip()
 
 
-async def _click_spotify_first_song(timeout_seconds: int = 8) -> tuple[bool, str]:
-    """Click the first song result in Spotify search on this Windows layout."""
+async def _play_spotify_search_result(query: str, timeout_seconds: int = 10) -> tuple[bool, str]:
+    """Use Windows UI Automation to play the best Spotify search result and verify playback."""
     if not IS_WINDOWS:
-        return False, "Spotify click automation is only available on Windows"
+        return False, "Spotify playback automation is only available on Windows"
+
+    script = f"""
+$needleRaw = {_ps_quote(query)}
+function Normalize-SpotifyText([string]$text) {{
+    if (-not $text) {{
+        return ""
+    }}
+    return (($text.ToLower() -replace '[^a-z0-9]+', ' ').Trim())
+}}
+$needle = Normalize-SpotifyText $needleRaw
+
+$signature = @'
+using System;
+using System.Runtime.InteropServices;
+public static class WinApi {{
+    [DllImport("user32.dll")] public static extern bool ShowWindowAsync(IntPtr hWnd, int nCmdShow);
+    [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
+}}
+'@
+Add-Type -TypeDefinition $signature -ErrorAction SilentlyContinue | Out-Null
+Add-Type -AssemblyName UIAutomationClient
+Add-Type -AssemblyName UIAutomationTypes
+
+$deadline = (Get-Date).AddSeconds({timeout_seconds})
+do {{
+    $proc = Get-Process -Name 'Spotify' -ErrorAction SilentlyContinue | Where-Object {{ $_.MainWindowHandle -ne 0 }} | Select-Object -First 1
+    if ($proc) {{
+        [WinApi]::ShowWindowAsync($proc.MainWindowHandle, 3) | Out-Null
+        [WinApi]::SetForegroundWindow($proc.MainWindowHandle) | Out-Null
+        Start-Sleep -Milliseconds 450
+
+        $root = [System.Windows.Automation.AutomationElement]::FromHandle($proc.MainWindowHandle)
+        $buttonCondition = New-Object System.Windows.Automation.PropertyCondition(
+            [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
+            [System.Windows.Automation.ControlType]::Button
+        )
+        $buttons = $root.FindAll([System.Windows.Automation.TreeScope]::Descendants, $buttonCondition)
+        $best = $null
+        $bestScore = -100000
+
+        foreach ($button in $buttons) {{
+            $name = $button.Current.Name
+            if (-not $name -or -not $name.StartsWith('Play ')) {{
+                continue
+            }}
+
+            $normalizedName = Normalize-SpotifyText $name
+            if ($normalizedName -notlike "*$needle*") {{
+                continue
+            }}
+
+            $score = 0
+            if ($name -match '^Play (.+?) by (.+)$') {{
+                $titleNorm = Normalize-SpotifyText $matches[1]
+                $artistNorm = Normalize-SpotifyText $matches[2]
+                $score += 200
+                if ($titleNorm -eq $needle) {{
+                    $score += 500
+                }} elseif ($titleNorm -like "$needle*") {{
+                    $score += 320
+                }} elseif ($needle -like "$titleNorm*") {{
+                    $score += 240
+                }}
+                if ($artistNorm -and $needle -like "*$artistNorm*") {{
+                    $score += 140
+                }}
+            }} else {{
+                $score += 30
+            }}
+
+            if ($normalizedName -eq ("play " + $needle)) {{
+                $score += 260
+            }} elseif ($normalizedName -like ("play " + $needle + "*")) {{
+                $score += 180
+            }}
+            if ($name -match 'Radio|Playlist') {{
+                $score -= 120
+            }}
+
+            $score -= $name.Length
+            if ($score -gt $bestScore) {{
+                $best = $button
+                $bestScore = $score
+            }}
+        }}
+
+        if ($best) {{
+            $invoke = $best.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern)
+            $invoke.Invoke()
+            Start-Sleep -Milliseconds 1400
+
+            $all = $root.FindAll([System.Windows.Automation.TreeScope]::Descendants, [System.Windows.Automation.Condition]::TrueCondition)
+            foreach ($element in $all) {{
+                $name = $element.Current.Name
+                if (-not $name) {{
+                    continue
+                }}
+                $normalized = Normalize-SpotifyText $name
+                if ($name -like 'Now playing:*' -and $normalized -like "*$needle*") {{
+                    Write-Output $name
+                    exit 0
+                }}
+            }}
+        }}
+    }}
+    Start-Sleep -Milliseconds 300
+}} while ((Get-Date) -lt $deadline)
+Write-Error 'Spotify result playback could not be verified'
+exit 1
+"""
+    proc = await asyncio.create_subprocess_exec(
+        "powershell",
+        "-NoProfile",
+        "-Command",
+        script,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, stderr = await proc.communicate()
+    detail = (stderr or stdout).decode(errors="ignore").strip()
+    return proc.returncode == 0, detail
+
+
+async def _trigger_spotify_playback_with_space(timeout_seconds: int = 8) -> tuple[bool, str]:
+    """Fallback: focus Spotify and trigger playback with keyboard controls."""
+    if not IS_WINDOWS:
+        return False, "Spotify playback automation is only available on Windows"
 
     script = f"""
 $signature = @'
 using System;
 using System.Runtime.InteropServices;
 public static class WinApi {{
+    [DllImport("user32.dll")] public static extern bool ShowWindowAsync(IntPtr hWnd, int nCmdShow);
     [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
-    [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hWnd, out RECT rect);
-    [DllImport("user32.dll")] public static extern bool SetCursorPos(int X, int Y);
-    [DllImport("user32.dll")] public static extern bool GetCursorPos(out POINT point);
-    [DllImport("user32.dll")] public static extern void mouse_event(uint dwFlags, uint dx, uint dy, uint dwData, UIntPtr dwExtraInfo);
-    public struct RECT {{ public int Left; public int Top; public int Right; public int Bottom; }}
-    public struct POINT {{ public int X; public int Y; }}
 }}
 '@
 Add-Type -TypeDefinition $signature -ErrorAction SilentlyContinue | Out-Null
+$shell = New-Object -ComObject WScript.Shell
 $deadline = (Get-Date).AddSeconds({timeout_seconds})
 do {{
     $proc = Get-Process -Name 'Spotify' -ErrorAction SilentlyContinue | Where-Object {{ $_.MainWindowHandle -ne 0 }} | Select-Object -First 1
     if ($proc) {{
+        [WinApi]::ShowWindowAsync($proc.MainWindowHandle, 3) | Out-Null
         [WinApi]::SetForegroundWindow($proc.MainWindowHandle) | Out-Null
-        Start-Sleep -Milliseconds 250
-        $rect = New-Object WinApi+RECT
-        [WinApi]::GetWindowRect($proc.MainWindowHandle, [ref]$rect) | Out-Null
-        $x = [Math]::Min($rect.Right - 120, $rect.Left + 270)
-        $y = [Math]::Min($rect.Bottom - 90, $rect.Top + 700)
-        $original = New-Object WinApi+POINT
-        [WinApi]::GetCursorPos([ref]$original) | Out-Null
-        [WinApi]::SetCursorPos($x, $y) | Out-Null
-        Start-Sleep -Milliseconds 250
-        $down = 0x0002
-        $up = 0x0004
-        [WinApi]::mouse_event($down, 0, 0, 0, [UIntPtr]::Zero)
-        [WinApi]::mouse_event($up, 0, 0, 0, [UIntPtr]::Zero)
-        Start-Sleep -Milliseconds 120
-        [WinApi]::mouse_event($down, 0, 0, 0, [UIntPtr]::Zero)
-        [WinApi]::mouse_event($up, 0, 0, 0, [UIntPtr]::Zero)
-        Start-Sleep -Milliseconds 150
-        [WinApi]::SetCursorPos($original.X, $original.Y) | Out-Null
+        Start-Sleep -Milliseconds 700
+        $shell.SendKeys('{{ESC}}')
+        Start-Sleep -Milliseconds 220
+        $shell.SendKeys(' ')
         exit 0
     }}
     Start-Sleep -Milliseconds 300
@@ -652,14 +801,18 @@ async def play_spotify(query: str) -> dict:
             "confirmation": f"I had trouble searching Spotify for {cleaned}, sir.",
         }
 
-    await asyncio.sleep(2.5)
-    click_success, click_detail = await _click_spotify_first_song()
-    if not click_success and click_detail:
-        log.warning(f"play_spotify click fallback failed: {click_detail}")
-        return {
-            "success": True,
-            "confirmation": f"Opened Spotify search for {cleaned}, sir.",
-        }
+    await asyncio.sleep(2.0)
+    play_success, play_detail = await _play_spotify_search_result(cleaned)
+    if not play_success:
+        if play_detail:
+            log.warning(f"play_spotify UI automation failed: {play_detail}")
+        fallback_success, fallback_detail = await _trigger_spotify_playback_with_space()
+        if not fallback_success and fallback_detail:
+            log.warning(f"play_spotify keyboard fallback failed: {fallback_detail}")
+            return {
+                "success": True,
+                "confirmation": f"Opened Spotify search for {cleaned}, sir.",
+            }
 
     return {
         "success": True,

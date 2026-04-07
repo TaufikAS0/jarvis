@@ -4,7 +4,5 @@
   REST API:  https://0.0.0.0:8340/api/
   Tasks:     https://0.0.0.0:8340/api/tasks
 
-INFO:     127.0.0.1:64171 - "GET /api/health HTTP/1.1" 200 OK
-INFO:     127.0.0.1:52798 - "GET /api/settings/status HTTP/1.1" 200 OK
-INFO:     127.0.0.1:53692 - "GET /api/settings/status HTTP/1.1" 200 OK
-INFO:     127.0.0.1:65119 - "GET /api/settings/preferences HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59583 - "GET /api/health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49718 - "GET /api/settings/status HTTP/1.1" 200 OK
