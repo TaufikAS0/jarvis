@@ -23,6 +23,8 @@ interface StatusResponse {
     fish_audio: boolean;
     fish_voice_id: boolean;
     user_name: string;
+    user_location: string;
+    user_country: string;
   };
 }
 
@@ -30,6 +32,8 @@ interface PreferencesResponse {
   user_name: string;
   honorific: string;
   calendar_accounts: string;
+  user_location: string;
+  user_country: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -144,6 +148,16 @@ function buildPanelHTML(): string {
           </div>
 
           <div class="settings-field">
+            <label>Home Location</label>
+            <input type="text" id="input-user-location" placeholder="Cimahi" />
+          </div>
+
+          <div class="settings-field">
+            <label>Country / National Focus</label>
+            <input type="text" id="input-user-country" placeholder="Indonesia" />
+          </div>
+
+          <div class="settings-field">
             <label>Calendar Accounts</label>
             <textarea id="input-calendar-accounts" rows="2" placeholder="auto (or comma-separated emails)"></textarea>
           </div>
@@ -241,9 +255,13 @@ async function loadPreferences() {
     const prefs = await apiGet<PreferencesResponse>("/api/settings/preferences");
     const nameEl = document.getElementById("input-user-name") as HTMLInputElement;
     const honEl = document.getElementById("input-honorific") as HTMLSelectElement;
+    const locationEl = document.getElementById("input-user-location") as HTMLInputElement;
+    const countryEl = document.getElementById("input-user-country") as HTMLInputElement;
     const calEl = document.getElementById("input-calendar-accounts") as HTMLTextAreaElement;
     if (nameEl) nameEl.value = prefs.user_name || "";
     if (honEl) honEl.value = prefs.honorific || "sir";
+    if (locationEl) locationEl.value = prefs.user_location || "Cimahi";
+    if (countryEl) countryEl.value = prefs.user_country || "Indonesia";
     if (calEl) calEl.value = prefs.calendar_accounts || "auto";
   } catch (e) {
     console.error("[settings] failed to load preferences:", e);
@@ -305,8 +323,10 @@ function wireEvents() {
   document.getElementById("btn-save-prefs")?.addEventListener("click", async () => {
     const user_name = (document.getElementById("input-user-name") as HTMLInputElement).value.trim();
     const honorific = (document.getElementById("input-honorific") as HTMLSelectElement).value;
+    const user_location = (document.getElementById("input-user-location") as HTMLInputElement).value.trim();
+    const user_country = (document.getElementById("input-user-country") as HTMLInputElement).value.trim();
     const calendar_accounts = (document.getElementById("input-calendar-accounts") as HTMLTextAreaElement).value.trim();
-    await apiPost("/api/settings/preferences", { user_name, honorific, calendar_accounts });
+    await apiPost("/api/settings/preferences", { user_name, honorific, user_location, user_country, calendar_accounts });
     await loadStatus();
   });
 

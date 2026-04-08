@@ -46,11 +46,13 @@ from actions import (
     open_browser,
     open_app,
     play_spotify,
+    control_spotify,
     handoff_to_codex,
     open_claude_in_project,
     _generate_project_name,
     prompt_existing_terminal,
     normalize_desktop_app_name,
+    extract_spotify_control,
     extract_spotify_query,
     should_use_codex_delegate,
 )
@@ -78,7 +80,6 @@ ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 FISH_API_KEY = os.getenv("FISH_API_KEY", "")
 FISH_VOICE_ID = os.getenv("FISH_VOICE_ID", "612b878b113047d9a770c069c8b4fdfe")  # JARVIS (MCU)
 FISH_API_URL = "https://api.fish.audio/v1/tts"
-USER_NAME = os.getenv("USER_NAME", "sir")
 PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
 JARVIS_CHAT_MODEL = os.getenv("JARVIS_CHAT_MODEL", "claude-sonnet-4-6")
 JARVIS_FAST_MODEL = os.getenv("JARVIS_FAST_MODEL", "claude-haiku-4-5-20251001")
@@ -86,12 +87,37 @@ JARVIS_RESEARCH_MODEL = os.getenv("JARVIS_RESEARCH_MODEL", "claude-opus-4-6")
 
 DESKTOP_PATH = Path.home() / "Desktop"
 
+
+def _env_pref(name: str, default: str) -> str:
+    value = os.getenv(name, default).strip()
+    return value or default
+
+
+def get_user_name() -> str:
+    return _env_pref("USER_NAME", "Taufik")
+
+
+def get_honorific() -> str:
+    return _env_pref("HONORIFIC", "sir")
+
+
+def get_user_location() -> str:
+    return _env_pref("USER_LOCATION", "Cimahi")
+
+
+def get_user_country() -> str:
+    return _env_pref("USER_COUNTRY", "Indonesia")
+
+
+def get_user_timezone() -> str:
+    return _env_pref("USER_TIMEZONE", "Asia/Jakarta")
+
 JARVIS_SYSTEM_PROMPT = """\
 You are JARVIS — Just A Rather Very Intelligent System. You serve as {user_name}'s AI assistant, modeled precisely after Tony Stark's AI from the MCU films.
 
 VOICE & PERSONALITY:
 - British butler elegance with understated dry wit
-- Address {user_name} as "sir" naturally — not every sentence, but regularly
+- Address {user_name} as "{honorific}" naturally — not every sentence, but regularly
 - Never say "How can I help you?" or "Is there anything else?" — just act
 - Deliver bad news calmly, like reporting weather: "We have a slight problem, sir."
 - Your humor is observational, never jokes: state facts and let implications land
@@ -102,6 +128,17 @@ TIME & WEATHER AWARENESS:
 - Current time: {current_time}
 - Greet accordingly: "Good morning, sir" / "Good evening, sir"
 - {weather_info}
+
+MASTER PROFILE:
+- Your master/owner is {user_name}
+- Default local context: {user_location}, {user_country}
+- If the user asks about "here", local weather, local news, or what's happening nearby without naming a place, assume {user_location}
+- Treat Taufik as the person you serve and the owner of this system
+
+LOCAL INTEL SNAPSHOT:
+{news_context}
+- Treat this as your pre-fetched briefing for Cimahi, Indonesia, and the wider world
+- When the user asks for "berita terpanas", prioritize today's high-signal headlines and give extra attention to Iran-America developments when relevant
 
 CONVERSATION STYLE:
 - "Will do, sir." — acknowledging tasks
@@ -267,6 +304,19 @@ _cached_weather: Optional[str] = None
 _weather_fetched: bool = False
 
 
+def _build_location_label(location: str, country: str, nearest: Optional[dict] = None) -> str:
+    region = ""
+    if nearest:
+        region = ((nearest.get("region") or [{}])[0]).get("value", "")
+
+    location_bits = [location]
+    if region and region.lower() != location.lower():
+        location_bits.append(region)
+    if country and country.lower() not in {location.lower(), region.lower()}:
+        location_bits.append(country)
+    return ", ".join(bit for bit in location_bits if bit)
+
+
 async def fetch_weather() -> str:
     """Fetch current weather from wttr.in. Cached for the session."""
     global _cached_weather, _weather_fetched
@@ -283,6 +333,283 @@ async def fetch_weather() -> str:
         log.warning(f"Weather fetch failed: {e}")
     _cached_weather = None
     return "Weather data unavailable."
+
+
+def _fetch_weather_brief_sync(location: str, country: str) -> str:
+    """Fetch current local weather without requiring extra API keys."""
+    import json as _json
+    import urllib.parse as _urlparse
+    import urllib.request as _urlrequest
+
+    encoded_location = _urlparse.quote(location)
+    url = f"https://wttr.in/{encoded_location}?format=j1"
+    req = _urlrequest.Request(url, headers={"User-Agent": "curl/8.0"})
+    with _urlrequest.urlopen(req, timeout=5) as resp:
+        data = _json.loads(resp.read().decode("utf-8", errors="ignore"))
+
+    current = (data.get("current_condition") or [{}])[0]
+    nearest = (data.get("nearest_area") or [{}])[0]
+    desc = ((current.get("weatherDesc") or [{}])[0]).get("value", "Unknown conditions")
+    temp_c = current.get("temp_C", "?")
+    feels_c = current.get("FeelsLikeC", "?")
+    humidity = current.get("humidity", "?")
+    wind = current.get("windspeedKmph", "?")
+    visibility = current.get("visibility", "?")
+
+    location_label = _build_location_label(location, country, nearest)
+
+    return (
+        f"Current weather in {location_label}: {desc}, {temp_c}°C, "
+        f"feels like {feels_c}°C, humidity {humidity}%, wind {wind} km/h, visibility {visibility} km."
+    )
+
+
+def _fetch_weather_snapshot_sync(location: str, country: str) -> dict[str, str]:
+    """Fetch both current conditions and a simple tomorrow forecast."""
+    import json as _json
+    import urllib.parse as _urlparse
+    import urllib.request as _urlrequest
+
+    encoded_location = _urlparse.quote(location)
+    url = f"https://wttr.in/{encoded_location}?format=j1"
+    req = _urlrequest.Request(url, headers={"User-Agent": "curl/8.0"})
+    with _urlrequest.urlopen(req, timeout=5) as resp:
+        data = _json.loads(resp.read().decode("utf-8", errors="ignore"))
+
+    current = (data.get("current_condition") or [{}])[0]
+    nearest = (data.get("nearest_area") or [{}])[0]
+    location_label = _build_location_label(location, country, nearest)
+
+    desc = ((current.get("weatherDesc") or [{}])[0]).get("value", "Unknown conditions")
+    temp_c = current.get("temp_C", "?")
+    feels_c = current.get("FeelsLikeC", "?")
+    humidity = current.get("humidity", "?")
+    wind = current.get("windspeedKmph", "?")
+    visibility = current.get("visibility", "?")
+
+    forecast_days = data.get("weather") or []
+    tomorrow = forecast_days[1] if len(forecast_days) > 1 else {}
+    tomorrow_hourly = tomorrow.get("hourly") or [{}]
+    tomorrow_slot = tomorrow_hourly[min(4, len(tomorrow_hourly) - 1)] if tomorrow_hourly else {}
+    tomorrow_desc = ((tomorrow_slot.get("weatherDesc") or [{}])[0]).get("value", "Unknown conditions")
+    tomorrow_min = tomorrow.get("mintempC", "?")
+    tomorrow_max = tomorrow.get("maxtempC", "?")
+    chance_rain = tomorrow_slot.get("chanceofrain", "")
+    rain_suffix = f", rain chance {chance_rain}%" if chance_rain and chance_rain != "0" else ""
+    rain_suffix_voice = f", peluang hujan {chance_rain} persen" if chance_rain and chance_rain != "0" else ""
+
+    return {
+        "location_label": location_label,
+        "current": (
+            f"Current weather in {location_label}: {desc}, {temp_c}Â°C, "
+            f"feels like {feels_c}Â°C, humidity {humidity}%, wind {wind} km/h, visibility {visibility} km."
+        ),
+        "tomorrow": (
+            f"Tomorrow in {location_label}: {tomorrow_desc}, {tomorrow_min}Â°C to {tomorrow_max}Â°C{rain_suffix}."
+        ),
+        "current_voice": (
+            f"{desc}, {temp_c} derajat, terasa seperti {feels_c} derajat, "
+            f"kelembapan {humidity} persen, angin {wind} kilometer per jam"
+        ),
+        "tomorrow_voice": (
+            f"{tomorrow_desc} dengan suhu {tomorrow_min} sampai {tomorrow_max} derajat{rain_suffix_voice}"
+        ),
+    }
+
+
+def _fetch_tomorrow_weather_brief_sync(location: str, country: str) -> str:
+    """Fetch tomorrow's local weather without requiring extra API keys."""
+    return _fetch_weather_snapshot_sync(location, country)["tomorrow"]
+
+
+def _fetch_google_news_items_sync(query: str, limit: int = 8) -> list[dict]:
+    """Fetch recent Google News RSS items for the last two days."""
+    import html as _html
+    import urllib.parse as _urlparse
+    import urllib.request as _urlrequest
+    import xml.etree.ElementTree as _etree
+
+    search_query = f"{query} when:2d"
+    url = (
+        "https://news.google.com/rss/search?q="
+        + _urlparse.quote(search_query)
+        + "&hl=id&gl=ID&ceid=ID:id"
+    )
+    req = _urlrequest.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    with _urlrequest.urlopen(req, timeout=8) as resp:
+        root = _etree.fromstring(resp.read())
+
+    items: list[dict] = []
+    for item in root.findall("./channel/item"):
+        raw_title = _html.unescape((item.findtext("title") or "").strip())
+        headline, sep, source = raw_title.rpartition(" - ")
+        if not sep:
+            headline, source = raw_title, ""
+        items.append(
+            {
+                "headline": headline.strip(),
+                "source": source.strip(),
+                "published": (item.findtext("pubDate") or "").strip(),
+                "link": (item.findtext("link") or "").strip(),
+            }
+        )
+        if len(items) >= limit:
+            break
+    return items
+
+
+def _collect_recent_news_buckets(query: str, tz_name: str, per_bucket: int = 2) -> dict[str, list[dict]]:
+    """Collect today/yesterday headlines for one query."""
+    from datetime import datetime, timedelta, timezone
+    from email.utils import parsedate_to_datetime
+    from zoneinfo import ZoneInfo
+
+    try:
+        tz = ZoneInfo(tz_name)
+    except Exception:
+        tz = timezone.utc
+
+    now_local = datetime.now(tz)
+    today = now_local.date()
+    yesterday = today - timedelta(days=1)
+
+    buckets: dict[str, list[dict]] = {"today": [], "yesterday": []}
+    seen: set[str] = set()
+
+    for item in _fetch_google_news_items_sync(query, limit=10):
+        key = item["headline"].lower()
+        if key in seen:
+            continue
+        seen.add(key)
+
+        published = item.get("published", "")
+        try:
+            dt = parsedate_to_datetime(published)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            local_date = dt.astimezone(tz).date()
+        except Exception:
+            local_date = today
+
+        bucket_name = "today" if local_date == today else "yesterday" if local_date == yesterday else None
+        if not bucket_name:
+            continue
+        if len(buckets[bucket_name]) >= per_bucket:
+            continue
+
+        buckets[bucket_name].append(item)
+
+    return buckets
+
+
+def _collect_focus_news_today(tz_name: str, queries: list[str], limit: int = 2) -> list[dict]:
+    """Collect today's headlines from several queries, keeping only unique items."""
+    merged: list[dict] = []
+    seen: set[str] = set()
+
+    for query in queries:
+        buckets = _collect_recent_news_buckets(query, tz_name, per_bucket=limit)
+        for item in buckets["today"]:
+            key = item["headline"].lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(item)
+            if len(merged) >= limit:
+                return merged
+
+    return merged
+
+
+def _format_today_news_snapshot(label: str, items: list[dict]) -> str:
+    lines = [f"{label} today:"]
+    if not items:
+        lines.append("- No major headlines captured.")
+        return "\n".join(lines)
+
+    for item in items:
+        source = f" ({item['source']})" if item.get("source") else ""
+        lines.append(f"- {item['headline']}{source}")
+    return "\n".join(lines)
+
+
+def _format_recent_news_snapshot(label: str, query: str, tz_name: str) -> str:
+    """Summarize today/yesterday headlines for one query."""
+    buckets = _collect_recent_news_buckets(query, tz_name)
+    today_lines = []
+    yesterday_lines = []
+
+    for item in buckets["today"]:
+        source = f" ({item['source']})" if item.get("source") else ""
+        today_lines.append(f"- {item['headline']}{source}")
+
+    for item in buckets["yesterday"]:
+        source = f" ({item['source']})" if item.get("source") else ""
+        yesterday_lines.append(f"- {item['headline']}{source}")
+
+    lines = [f"{label} today:"]
+    lines.extend(today_lines or ["- No major headlines captured."])
+    lines.append(f"{label} yesterday:")
+    lines.extend(yesterday_lines or ["- No major headlines captured."])
+    return "\n".join(lines)
+
+
+def _build_local_news_context_sync(location: str, country: str, tz_name: str) -> str:
+    """Build the combined local/national/world briefing for the prompt cache."""
+    local_summary = _format_today_news_snapshot(
+        f"{location} headlines",
+        _collect_recent_news_buckets(location, tz_name)["today"],
+    )
+    national_summary = _format_today_news_snapshot(
+        f"{country} headlines",
+        _collect_recent_news_buckets(country, tz_name)["today"],
+    )
+    world_summary = _format_today_news_snapshot(
+        "World focus headlines",
+        _collect_focus_news_today(
+            tz_name,
+            ["Iran Amerika", "Iran AS", "Amerika Iran", "dunia", "world news"],
+        ),
+    )
+    return (
+        "Most recent headline snapshot from Google News RSS.\n"
+        f"{local_summary}\n"
+        f"{national_summary}\n"
+        f"{world_summary}"
+    )
+
+
+def _headlines_to_notes(label: str, items: list[dict]) -> str:
+    if not items:
+        return f"{label}: none captured."
+    return f"{label}: " + " | ".join(item["headline"] for item in items[:2])
+
+
+def _build_first_turn_briefing_sync(location: str, country: str, tz_name: str) -> str:
+    weather = _fetch_weather_snapshot_sync(location, country)
+    local_today = _collect_recent_news_buckets(location, tz_name)["today"]
+    national_today = _collect_recent_news_buckets(country, tz_name)["today"]
+    world_today = _collect_focus_news_today(
+        tz_name,
+        ["Iran Amerika", "Iran AS", "Amerika Iran", "dunia", "world news"],
+    )
+    current_prefix = f"Current weather in {weather['location_label']}: "
+    tomorrow_prefix = f"Tomorrow in {weather['location_label']}: "
+    current_weather = weather["current"]
+    tomorrow_weather = weather["tomorrow"]
+    if current_weather.startswith(current_prefix):
+        current_weather = current_weather[len(current_prefix):]
+    if tomorrow_weather.startswith(tomorrow_prefix):
+        tomorrow_weather = tomorrow_weather[len(tomorrow_prefix):]
+
+    return (
+        f"Owner: {get_user_name()}.\n"
+        f"Current weather in {location}: {current_weather}\n"
+        f"Tomorrow forecast for {location}: {tomorrow_weather}\n"
+        f"{_headlines_to_notes(f'{location} headlines today', local_today)}\n"
+        f"{_headlines_to_notes(f'{country} headlines today', national_today)}\n"
+        f"{_headlines_to_notes('World headlines today with Iran-America focus', world_today)}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1142,6 +1469,7 @@ async def generate_response(
     screen_ctx = _ctx_cache["screen"]
     calendar_ctx = _ctx_cache["calendar"]
     mail_ctx = _ctx_cache["mail"]
+    news_ctx = _ctx_cache.get("news", "No local news snapshot yet.")
 
     # Check if any lookups are in progress
     lookup_status = get_lookup_status()
@@ -1152,10 +1480,14 @@ async def generate_response(
         screen_context=screen_ctx or "Not checked yet.",
         calendar_context=calendar_ctx,
         mail_context=mail_ctx,
+        news_context=news_ctx,
         active_tasks=task_mgr.get_active_tasks_summary(),
         dispatch_context=dispatch_registry.format_for_prompt(),
         known_projects=format_projects_for_prompt(projects),
-        user_name=USER_NAME,
+        user_name=get_user_name(),
+        honorific=get_honorific(),
+        user_location=get_user_location(),
+        user_country=get_user_country(),
         project_dir=PROJECT_DIR,
     )
     if lookup_status:
@@ -1329,6 +1661,10 @@ _ctx_cache = {
     "calendar": "No calendar data yet.",
     "mail": "No mail data yet.",
     "weather": "Weather data unavailable.",
+    "news": "No local news snapshot yet.",
+    "briefing": "",
+    "briefing_spoken": "",
+    "briefing_spoken_source": "",
 }
 
 
@@ -1340,6 +1676,9 @@ def _refresh_context_sync():
     import threading
 
     def _worker():
+        last_weather_refresh = 0.0
+        last_news_refresh = 0.0
+        last_briefing_refresh = 0.0
         while True:
             try:
                 # Screen — fast
@@ -1389,16 +1728,40 @@ return windowList
             except Exception as e:
                 log.debug(f"Context thread error: {e}")
 
-            # Weather — refresh every loop (30s is fine, API is fast)
-            try:
-                import urllib.request, json as _json
-                url = "https://api.open-meteo.com/v1/forecast?latitude=27.77&longitude=-82.64&current=temperature_2m,weathercode&temperature_unit=fahrenheit"
-                with urllib.request.urlopen(url, timeout=3) as resp:
-                    d = _json.loads(resp.read()).get("current", {})
-                    temp = d.get("temperature_2m", "?")
-                    _ctx_cache["weather"] = f"Current weather in St. Petersburg, FL: {temp}°F"
-            except Exception:
-                pass
+            now_ts = time.time()
+
+            if now_ts - last_weather_refresh >= 180:
+                try:
+                    _ctx_cache["weather"] = _fetch_weather_brief_sync(get_user_location(), get_user_country())
+                except Exception as e:
+                    log.debug(f"Weather refresh failed: {e}")
+                last_weather_refresh = now_ts
+
+            if now_ts - last_news_refresh >= 300:
+                try:
+                    _ctx_cache["news"] = _build_local_news_context_sync(
+                        get_user_location(),
+                        get_user_country(),
+                        get_user_timezone(),
+                    )
+                except Exception as e:
+                    log.debug(f"News refresh failed: {e}")
+                last_news_refresh = now_ts
+
+            if now_ts - last_briefing_refresh >= 300:
+                try:
+                    new_briefing = _build_first_turn_briefing_sync(
+                        get_user_location(),
+                        get_user_country(),
+                        get_user_timezone(),
+                    )
+                    _ctx_cache["briefing"] = new_briefing
+                    if _ctx_cache.get("briefing_spoken_source") != new_briefing:
+                        _ctx_cache["briefing_spoken"] = ""
+                        _ctx_cache["briefing_spoken_source"] = ""
+                except Exception as e:
+                    log.debug(f"Briefing refresh failed: {e}")
+                last_briefing_refresh = now_ts
 
             time.sleep(30)
 
@@ -1530,6 +1893,21 @@ def detect_action_fast(text: str) -> dict | None:
     """
     t = text.lower().strip()
 
+    if any(p in t for p in [
+        "brief me", "daily briefing", "news briefing", "read the briefing",
+        "give me the briefing", "give me the news", "read me the news",
+        "read the news", "bacakan briefing", "bacakan berita",
+        "berita hari ini", "berita terpanas", "morning briefing"
+    ]):
+        return {"action": "read_briefing"}
+
+    if any(p in t for p in [
+        "can you hear me", "are you listening", "do you hear me",
+        "apakah kau mendengarku", "kau mendengarku", "bisa dengar aku",
+        "apakah kamu mendengarku", "kamu dengar aku"
+    ]):
+        return {"action": "acknowledge_voice"}
+
     # Screen requests — checked BEFORE project matching to prevent misrouting
     if any(p in t for p in ["look at my screen", "what's on my screen", "whats on my screen",
                              "what am i looking at", "what do you see", "see my screen",
@@ -1539,6 +1917,10 @@ def detect_action_fast(text: str) -> dict | None:
     # Terminal / Claude Code — explicit open requests
     if any(w in t for w in ["open claude", "start claude", "launch claude", "run claude"]):
         return {"action": "open_terminal"}
+
+    spotify_control = extract_spotify_control(text)
+    if spotify_control:
+        return {"action": "spotify_control", "target": spotify_control}
 
     spotify_query = extract_spotify_query(text)
     if spotify_query:
@@ -1615,6 +1997,19 @@ async def handle_open_app(target: str) -> str:
 async def handle_play_spotify(target: str) -> str:
     result = await play_spotify(target)
     return result["confirmation"]
+
+
+async def handle_spotify_control(target: str) -> str:
+    result = await control_spotify(target)
+    return result["confirmation"]
+
+
+async def handle_read_briefing() -> str:
+    return await _get_spoken_briefing_text()
+
+
+async def handle_acknowledge_voice() -> str:
+    return "Loud and clear, sir."
 
 
 async def handle_build(target: str) -> str:
@@ -1876,7 +2271,7 @@ async def handle_research(text: str, target: str, client: anthropic.AsyncAnthrop
         research_response = await client.messages.create(
             model=JARVIS_RESEARCH_MODEL,
             max_tokens=2000,
-            system=f"You are JARVIS, researching a topic for {USER_NAME}. Be thorough, organized, and cite sources where possible.",
+            system=f"You are JARVIS, researching a topic for {get_user_name()}. Be thorough, organized, and cite sources where possible.",
             messages=[{"role": "user", "content": f"Research this thoroughly:\n\n{target}"}],
         )
         research_text = research_response.content[0].text
@@ -1953,6 +2348,78 @@ Write an updated summary in 2-4 sentences capturing the key topics, decisions, a
         return old_summary  # Keep old summary on failure
 
 
+async def _polish_first_turn_briefing(raw_briefing: str, client: anthropic.AsyncAnthropic | None) -> str:
+    """Rewrite the first-turn briefing into relaxed spoken English for TTS."""
+    if not raw_briefing.strip() or not client:
+        return raw_briefing.strip()
+
+    prompt = (
+        "Rewrite these briefing notes into exactly five short sentences of relaxed spoken English for JARVIS TTS. "
+        "Sentence 1 should cover current weather in Cimahi. Sentence 2 should cover tomorrow's forecast. "
+        "Sentence 3 should cover today's Cimahi headlines. Sentence 4 should cover today's Indonesia headlines. "
+        "Sentence 5 should cover today's world headlines, prioritizing Iran-America developments if present. "
+        "Translate Indonesian phrasing and headlines into English when possible, keep names and facts accurate, and do not invent anything. "
+        "No markdown, no bullet points, no lists."
+    )
+
+    try:
+        response = await client.messages.create(
+            model=JARVIS_FAST_MODEL,
+            max_tokens=220,
+            system=prompt,
+            messages=[{"role": "user", "content": raw_briefing}],
+        )
+        polished = response.content[0].text.strip()
+        return polished or raw_briefing.strip()
+    except Exception as e:
+        log.debug(f"Briefing polish failed: {e}")
+        return raw_briefing.strip()
+
+
+async def _get_spoken_briefing_text() -> str:
+    """Return the cached spoken briefing, generating it on demand if needed."""
+    spoken = (_ctx_cache.get("briefing_spoken") or "").strip()
+    raw = (_ctx_cache.get("briefing") or "").strip()
+
+    if spoken and raw and _ctx_cache.get("briefing_spoken_source") == raw:
+        return spoken
+
+    if not raw:
+        try:
+            loop = asyncio.get_event_loop()
+            raw = await asyncio.wait_for(
+                loop.run_in_executor(
+                    None,
+                    _build_first_turn_briefing_sync,
+                    get_user_location(),
+                    get_user_country(),
+                    get_user_timezone(),
+                ),
+                timeout=10,
+            )
+            _ctx_cache["briefing"] = raw
+        except Exception as e:
+            log.debug(f"Briefing build failed: {e}")
+            raw = ""
+
+    if not raw:
+        return "Your local briefing is not ready just yet, sir."
+
+    polished = await _polish_first_turn_briefing(raw, anthropic_client)
+    polished = polished.strip() or raw
+    _ctx_cache["briefing_spoken"] = polished
+    _ctx_cache["briefing_spoken_source"] = raw
+    return polished
+
+
+async def _warm_spoken_briefing_cache():
+    """Warm the spoken briefing cache in the background without blocking the user."""
+    try:
+        await _get_spoken_briefing_text()
+    except Exception as e:
+        log.debug(f"Spoken briefing warm-up failed: {e}")
+
+
 # -- WebSocket Voice Handler -----------------------------------------------
 
 @app.websocket("/ws/voice")
@@ -1990,6 +2457,7 @@ async def voice_handler(ws: WebSocket):
     session_summary: str = ""  # Rolling summary of older conversation
     summary_update_pending: bool = False
     messages_since_last_summary: int = 0
+    first_turn_offer_pending: bool = True
 
     log.info("Voice WebSocket connected")
 
@@ -2024,6 +2492,8 @@ async def voice_handler(ws: WebSocket):
                     log.warning(f"Greeting failed: {e}")
 
             asyncio.create_task(_send_greeting())
+
+        asyncio.create_task(_warm_spoken_briefing_cache())
 
         try:
             await ws.send_json({"type": "status", "state": "idle"})
@@ -2068,6 +2538,11 @@ async def voice_handler(ws: WebSocket):
             voice_state["last_user_time"] = time.time()
             log.info(f"User: {user_text}")
             await ws.send_json({"type": "status", "state": "thinking"})
+
+            first_turn_offer = ""
+            if first_turn_offer_pending:
+                first_turn_offer_pending = False
+                first_turn_offer = "Your local briefing is ready whenever you'd like it, sir."
 
             # Lazy project scan on first message
             global cached_projects
@@ -2186,7 +2661,7 @@ async def voice_handler(ws: WebSocket):
                                     model=JARVIS_FAST_MODEL,
                                     max_tokens=100,
                                     system=(
-                                        f"You are JARVIS reporting to the user ({USER_NAME}). Summarize what happened in 1-2 sentences. "
+                                        f"You are JARVIS reporting to the user ({get_user_name()}). Summarize what happened in 1-2 sentences. "
                                         "Speak in first person — 'I built', 'I found', 'I set up'. "
                                         "You are talking TO THE USER, not to a coding tool. "
                                         "NEVER give instructions like 'go ahead and build' or 'set up the frontend' — those are NOT for the user. "
@@ -2206,7 +2681,13 @@ async def voice_handler(ws: WebSocket):
                     action = detect_action_fast(user_text)
 
                     if action:
-                        if action["action"] == "open_terminal":
+                        if action["action"] == "acknowledge_voice":
+                            response_text = await handle_acknowledge_voice()
+                        elif action["action"] == "read_briefing":
+                            response_text = await handle_read_briefing()
+                        elif action["action"] == "spotify_control":
+                            response_text = await handle_spotify_control(action["target"])
+                        elif action["action"] == "open_terminal":
                             response_text = await handle_open_terminal()
                         elif action["action"] == "open_app":
                             response_text = await handle_open_app(action["target"])
@@ -2397,6 +2878,9 @@ async def voice_handler(ws: WebSocket):
                                                 pass
                                     asyncio.create_task(_read_and_report(embedded_action["target"].strip(), ws))
 
+                if first_turn_offer and "briefing" not in response_text.lower():
+                    response_text = f"{response_text} {first_turn_offer}".strip()
+
                 # Update history
                 history.append({"role": "user", "content": user_text})
                 history.append({"role": "assistant", "content": response_text})
@@ -2523,10 +3007,23 @@ class PreferencesUpdate(BaseModel):
     user_name: str = ""
     honorific: str = "sir"
     calendar_accounts: str = "auto"
+    user_location: str = "Cimahi"
+    user_country: str = "Indonesia"
 
 @app.post("/api/settings/keys")
 async def api_settings_keys(body: KeyUpdate):
-    allowed = {"ANTHROPIC_API_KEY", "FISH_API_KEY", "FISH_VOICE_ID", "USER_NAME", "HONORIFIC", "CALENDAR_ACCOUNTS", "DEV_AGENT"}
+    allowed = {
+        "ANTHROPIC_API_KEY",
+        "FISH_API_KEY",
+        "FISH_VOICE_ID",
+        "USER_NAME",
+        "HONORIFIC",
+        "CALENDAR_ACCOUNTS",
+        "DEV_AGENT",
+        "USER_LOCATION",
+        "USER_COUNTRY",
+        "USER_TIMEZONE",
+    }
     if body.key_name not in allowed:
         return JSONResponse({"success": False, "error": "Invalid key name"}, status_code=400)
     _write_env_key(body.key_name, body.key_value)
@@ -2608,6 +3105,8 @@ async def api_settings_status():
             "fish_voice_id": bool(env_dict.get("FISH_VOICE_ID", "").strip()),
             "dev_agent": codex_delegate,
             "user_name": env_dict.get("USER_NAME", ""),
+            "user_location": env_dict.get("USER_LOCATION", ""),
+            "user_country": env_dict.get("USER_COUNTRY", ""),
         },
     }
 
@@ -2618,6 +3117,8 @@ async def api_get_preferences():
         "user_name": env_dict.get("USER_NAME", ""),
         "honorific": env_dict.get("HONORIFIC", "sir"),
         "calendar_accounts": env_dict.get("CALENDAR_ACCOUNTS", "auto"),
+        "user_location": env_dict.get("USER_LOCATION", "Cimahi"),
+        "user_country": env_dict.get("USER_COUNTRY", "Indonesia"),
     }
 
 @app.post("/api/settings/preferences")
@@ -2625,6 +3126,8 @@ async def api_save_preferences(body: PreferencesUpdate):
     _write_env_key("USER_NAME", body.user_name)
     _write_env_key("HONORIFIC", body.honorific)
     _write_env_key("CALENDAR_ACCOUNTS", body.calendar_accounts)
+    _write_env_key("USER_LOCATION", body.user_location)
+    _write_env_key("USER_COUNTRY", body.user_country)
     return {"success": True}
 
 # ---------------------------------------------------------------------------

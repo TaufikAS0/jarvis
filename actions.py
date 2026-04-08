@@ -313,11 +313,11 @@ def should_use_codex_delegate() -> bool:
     return IS_WINDOWS and get_dev_agent_mode() in {"auto", "codex", "codex_handoff"}
 
 
-def extract_spotify_query(text: str) -> str | None:
-    """Extract a song request from a short Spotify/music command."""
+def _normalize_spotify_command_text(text: str) -> str:
+    """Normalize a spoken Spotify command into a compact lowercase form."""
     original = re.sub(r"\s+", " ", text.strip())
     if not original:
-        return None
+        return ""
 
     normalized = original.lower()
     normalized = re.sub(r"[!?]", " ", normalized)
@@ -345,6 +345,53 @@ def extract_spotify_query(text: str) -> str | None:
                 normalized = updated
                 changed = True
 
+    return normalized
+
+
+def extract_spotify_control(text: str) -> str | None:
+    """Extract short Spotify transport commands like pause or next."""
+    normalized = _normalize_spotify_command_text(text)
+    if not normalized:
+        return None
+
+    control_patterns = {
+        "pause": [
+            r"^(?:pause|stop)\s+(?:spotify|music|musik|song|lagu)$",
+            r"^spotify\s+(?:pause|stop)$",
+            r"^(?:pause|hentikan)\s+(?:the\s+)?(?:music|musik|song|lagu)$",
+        ],
+        "resume": [
+            r"^(?:resume|continue|lanjutkan)\s+(?:spotify|music|musik|song|lagu)$",
+            r"^spotify\s+(?:resume|continue|lanjutkan)$",
+            r"^(?:play)\s+(?:spotify|music|musik)$",
+        ],
+        "next": [
+            r"^(?:next|skip)\s+(?:song|track|lagu)?$",
+            r"^spotify\s+(?:next|skip)$",
+            r"^(?:lagu|track)\s+berikut(?:nya)?$",
+        ],
+        "previous": [
+            r"^(?:previous|back|last)\s+(?:song|track|lagu)?$",
+            r"^spotify\s+(?:previous|back)$",
+            r"^(?:lagu|track)\s+sebelum(?:nya)?$",
+        ],
+        "play_first_result": [
+            r"^(?:play|putar(?:kan)?|mainkan)\s+(?:the\s+)?(?:first|top)\s+result$",
+            r"^(?:putar(?:kan)?|mainkan)\s+hasil\s+pertama$",
+            r"^spotify\s+(?:first|top)\s+result$",
+        ],
+    }
+
+    for control, patterns in control_patterns.items():
+        if any(re.match(pattern, normalized, flags=re.IGNORECASE) for pattern in patterns):
+            return control
+
+    return None
+
+
+def extract_spotify_query(text: str) -> str | None:
+    """Extract a song request from a short Spotify/music command."""
+    normalized = _normalize_spotify_command_text(text)
     if not normalized:
         return None
 
@@ -445,6 +492,38 @@ function Normalize-SpotifyText([string]$text) {{
     }}
     return (($text.ToLower() -replace '[^a-z0-9]+', ' ').Trim())
 }}
+
+function Test-SpotifyPlayback([System.Windows.Automation.AutomationElement]$root, [string]$verifyNeedle) {{
+    if (-not $root) {{
+        return $false
+    }}
+
+    $all = $root.FindAll([System.Windows.Automation.TreeScope]::Descendants, [System.Windows.Automation.Condition]::TrueCondition)
+    foreach ($element in $all) {{
+        $name = $element.Current.Name
+        if (-not $name) {{
+            continue
+        }}
+
+        $normalized = Normalize-SpotifyText $name
+        if ($name -like 'Now playing:*') {{
+            if (-not $verifyNeedle -or $normalized -like "*$verifyNeedle*") {{
+                Write-Output $name
+                return $true
+            }}
+        }}
+
+        if ($name -like 'Pause *') {{
+            if (-not $verifyNeedle -or $normalized -like "*$verifyNeedle*") {{
+                Write-Output $name
+                return $true
+            }}
+        }}
+    }}
+
+    return $false
+}}
+
 $needle = Normalize-SpotifyText $needleRaw
 
 $signature = @'
@@ -458,6 +537,7 @@ public static class WinApi {{
 Add-Type -TypeDefinition $signature -ErrorAction SilentlyContinue | Out-Null
 Add-Type -AssemblyName UIAutomationClient
 Add-Type -AssemblyName UIAutomationTypes
+$shell = New-Object -ComObject WScript.Shell
 
 $deadline = (Get-Date).AddSeconds({timeout_seconds})
 do {{
@@ -475,6 +555,7 @@ do {{
         $buttons = $root.FindAll([System.Windows.Automation.TreeScope]::Descendants, $buttonCondition)
         $best = $null
         $bestScore = -100000
+        $bestVerifyNeedle = $needle
 
         foreach ($button in $buttons) {{
             $name = $button.Current.Name
@@ -488,9 +569,11 @@ do {{
             }}
 
             $score = 0
+            $candidateVerifyNeedle = $needle
             if ($name -match '^Play (.+?) by (.+)$') {{
                 $titleNorm = Normalize-SpotifyText $matches[1]
                 $artistNorm = Normalize-SpotifyText $matches[2]
+                $candidateVerifyNeedle = $titleNorm
                 $score += 200
                 if ($titleNorm -eq $needle) {{
                     $score += 500
@@ -519,23 +602,41 @@ do {{
             if ($score -gt $bestScore) {{
                 $best = $button
                 $bestScore = $score
+                $bestVerifyNeedle = $candidateVerifyNeedle
             }}
         }}
 
         if ($best) {{
-            $invoke = $best.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern)
-            $invoke.Invoke()
-            Start-Sleep -Milliseconds 1400
+            try {{
+                $invoke = $best.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern)
+                $invoke.Invoke()
+            }} catch {{
+            }}
 
-            $all = $root.FindAll([System.Windows.Automation.TreeScope]::Descendants, [System.Windows.Automation.Condition]::TrueCondition)
-            foreach ($element in $all) {{
-                $name = $element.Current.Name
-                if (-not $name) {{
-                    continue
+            for ($attempt = 0; $attempt -lt 5; $attempt++) {{
+                Start-Sleep -Milliseconds 450
+                if (Test-SpotifyPlayback $root $bestVerifyNeedle) {{
+                    exit 0
                 }}
-                $normalized = Normalize-SpotifyText $name
-                if ($name -like 'Now playing:*' -and $normalized -like "*$needle*") {{
-                    Write-Output $name
+            }}
+
+            try {{
+                $best.SetFocus()
+            }} catch {{
+            }}
+            Start-Sleep -Milliseconds 180
+            $shell.SendKeys('{{ENTER}}')
+            for ($attempt = 0; $attempt -lt 4; $attempt++) {{
+                Start-Sleep -Milliseconds 420
+                if (Test-SpotifyPlayback $root $bestVerifyNeedle) {{
+                    exit 0
+                }}
+            }}
+
+            $shell.SendKeys(' ')
+            for ($attempt = 0; $attempt -lt 4; $attempt++) {{
+                Start-Sleep -Milliseconds 420
+                if (Test-SpotifyPlayback $root $bestVerifyNeedle) {{
                     exit 0
                 }}
             }}
@@ -559,12 +660,52 @@ exit 1
     return proc.returncode == 0, detail
 
 
-async def _trigger_spotify_playback_with_space(timeout_seconds: int = 8) -> tuple[bool, str]:
-    """Fallback: focus Spotify and trigger playback with keyboard controls."""
+async def _trigger_spotify_playback_with_space(query: str, timeout_seconds: int = 8) -> tuple[bool, str]:
+    """Fallback: focus Spotify, send keyboard triggers, and verify playback."""
     if not IS_WINDOWS:
         return False, "Spotify playback automation is only available on Windows"
 
     script = f"""
+$needleRaw = {_ps_quote(query)}
+function Normalize-SpotifyText([string]$text) {{
+    if (-not $text) {{
+        return ""
+    }}
+    return (($text.ToLower() -replace '[^a-z0-9]+', ' ').Trim())
+}}
+
+function Test-SpotifyPlayback([System.Windows.Automation.AutomationElement]$root, [string]$verifyNeedle) {{
+    if (-not $root) {{
+        return $false
+    }}
+
+    $all = $root.FindAll([System.Windows.Automation.TreeScope]::Descendants, [System.Windows.Automation.Condition]::TrueCondition)
+    foreach ($element in $all) {{
+        $name = $element.Current.Name
+        if (-not $name) {{
+            continue
+        }}
+
+        $normalized = Normalize-SpotifyText $name
+        if ($name -like 'Now playing:*') {{
+            if (-not $verifyNeedle -or $normalized -like "*$verifyNeedle*") {{
+                Write-Output $name
+                return $true
+            }}
+        }}
+
+        if ($name -like 'Pause *') {{
+            if (-not $verifyNeedle -or $normalized -like "*$verifyNeedle*") {{
+                Write-Output $name
+                return $true
+            }}
+        }}
+    }}
+
+    return $false
+}}
+
+$needle = Normalize-SpotifyText $needleRaw
 $signature = @'
 using System;
 using System.Runtime.InteropServices;
@@ -574,6 +715,8 @@ public static class WinApi {{
 }}
 '@
 Add-Type -TypeDefinition $signature -ErrorAction SilentlyContinue | Out-Null
+Add-Type -AssemblyName UIAutomationClient
+Add-Type -AssemblyName UIAutomationTypes
 $shell = New-Object -ComObject WScript.Shell
 $deadline = (Get-Date).AddSeconds({timeout_seconds})
 do {{
@@ -582,14 +725,148 @@ do {{
         [WinApi]::ShowWindowAsync($proc.MainWindowHandle, 3) | Out-Null
         [WinApi]::SetForegroundWindow($proc.MainWindowHandle) | Out-Null
         Start-Sleep -Milliseconds 700
-        $shell.SendKeys('{{ESC}}')
-        Start-Sleep -Milliseconds 220
-        $shell.SendKeys(' ')
-        exit 0
+        $root = [System.Windows.Automation.AutomationElement]::FromHandle($proc.MainWindowHandle)
+
+        if (Test-SpotifyPlayback $root $needle) {{
+            exit 0
+        }}
+
+        $sequences = @('{{ESC}}', '{{ENTER}}', ' ')
+        foreach ($keys in $sequences) {{
+            $shell.SendKeys($keys)
+            Start-Sleep -Milliseconds 450
+            if (Test-SpotifyPlayback $root $needle) {{
+                exit 0
+            }}
+        }}
     }}
     Start-Sleep -Milliseconds 300
 }} while ((Get-Date) -lt $deadline)
-Write-Error 'Spotify window not ready'
+Write-Error 'Spotify keyboard fallback could not verify playback'
+exit 1
+"""
+    proc = await asyncio.create_subprocess_exec(
+        "powershell",
+        "-NoProfile",
+        "-Command",
+        script,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, stderr = await proc.communicate()
+    detail = (stderr or stdout).decode(errors="ignore").strip()
+    return proc.returncode == 0, detail
+
+
+async def _control_spotify_transport(control: str, timeout_seconds: int = 8) -> tuple[bool, str]:
+    """Trigger short Spotify transport controls via UI Automation."""
+    if not IS_WINDOWS:
+        return False, "Spotify transport automation is only available on Windows"
+
+    script = f"""
+$mode = {_ps_quote(control)}
+$signature = @'
+using System;
+using System.Runtime.InteropServices;
+public static class WinApi {{
+    [DllImport("user32.dll")] public static extern bool ShowWindowAsync(IntPtr hWnd, int nCmdShow);
+    [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
+}}
+'@
+Add-Type -TypeDefinition $signature -ErrorAction SilentlyContinue | Out-Null
+Add-Type -AssemblyName UIAutomationClient
+Add-Type -AssemblyName UIAutomationTypes
+$shell = New-Object -ComObject WScript.Shell
+
+function Pick-SpotifyButton($buttons, [string]$mode) {{
+    $best = $null
+    $bestScore = -100000
+
+    foreach ($button in $buttons) {{
+        $name = $button.Current.Name
+        if (-not $name) {{
+            continue
+        }}
+
+        $score = -100000
+        switch ($mode) {{
+            'pause' {{
+                if ($name -like 'Pause*') {{
+                    $score = 1000 - $name.Length
+                }}
+            }}
+            'resume' {{
+                if ($name -eq 'Play') {{
+                    $score = 1200
+                }} elseif ($name -like 'Play *' -and $name -notmatch 'Radio|Playlist') {{
+                    $score = 800 - $name.Length
+                }}
+            }}
+            'next' {{
+                if ($name -eq 'Next') {{
+                    $score = 1200
+                }} elseif ($name -like 'Next*') {{
+                    $score = 900 - $name.Length
+                }}
+            }}
+            'previous' {{
+                if ($name -eq 'Previous') {{
+                    $score = 1200
+                }} elseif ($name -like 'Previous*' -or $name -like 'Back*') {{
+                    $score = 900 - $name.Length
+                }}
+            }}
+            'play_first_result' {{
+                if ($name -like 'Play *' -and $name -notmatch 'Radio|Playlist') {{
+                    $rect = $button.Current.BoundingRectangle
+                    $score = 100000 - ([int]$rect.Top * 100) - [int]$rect.Left
+                }}
+            }}
+        }}
+
+        if ($score -gt $bestScore) {{
+            $best = $button
+            $bestScore = $score
+        }}
+    }}
+
+    return $best
+}}
+
+$deadline = (Get-Date).AddSeconds({timeout_seconds})
+do {{
+    $proc = Get-Process -Name 'Spotify' -ErrorAction SilentlyContinue | Where-Object {{ $_.MainWindowHandle -ne 0 }} | Select-Object -First 1
+    if ($proc) {{
+        [WinApi]::ShowWindowAsync($proc.MainWindowHandle, 3) | Out-Null
+        [WinApi]::SetForegroundWindow($proc.MainWindowHandle) | Out-Null
+        Start-Sleep -Milliseconds 500
+
+        $root = [System.Windows.Automation.AutomationElement]::FromHandle($proc.MainWindowHandle)
+        $buttonCondition = New-Object System.Windows.Automation.PropertyCondition(
+            [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
+            [System.Windows.Automation.ControlType]::Button
+        )
+        $buttons = $root.FindAll([System.Windows.Automation.TreeScope]::Descendants, $buttonCondition)
+        $best = Pick-SpotifyButton $buttons $mode
+        if ($best) {{
+            try {{
+                $invoke = $best.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern)
+                $invoke.Invoke()
+            }} catch {{
+                try {{
+                    $best.SetFocus()
+                }} catch {{
+                }}
+                Start-Sleep -Milliseconds 150
+                $shell.SendKeys('{{ENTER}}')
+            }}
+            Write-Output $best.Current.Name
+            exit 0
+        }}
+    }}
+    Start-Sleep -Milliseconds 300
+}} while ((Get-Date) -lt $deadline)
+Write-Error 'Spotify control button not found'
 exit 1
 """
     proc = await asyncio.create_subprocess_exec(
@@ -806,17 +1083,44 @@ async def play_spotify(query: str) -> dict:
     if not play_success:
         if play_detail:
             log.warning(f"play_spotify UI automation failed: {play_detail}")
-        fallback_success, fallback_detail = await _trigger_spotify_playback_with_space()
-        if not fallback_success and fallback_detail:
-            log.warning(f"play_spotify keyboard fallback failed: {fallback_detail}")
-            return {
-                "success": True,
-                "confirmation": f"Opened Spotify search for {cleaned}, sir.",
-            }
+    fallback_success, fallback_detail = await _trigger_spotify_playback_with_space(cleaned)
+    if not fallback_success and fallback_detail:
+        log.warning(f"play_spotify keyboard fallback failed: {fallback_detail}")
+        return {
+            "success": True,
+            "confirmation": f"Opened Spotify search for {cleaned}, sir, but playback still needs one tap.",
+        }
 
     return {
         "success": True,
         "confirmation": f"Playing {cleaned} on Spotify, sir.",
+    }
+
+
+async def control_spotify(control: str) -> dict:
+    """Control Spotify playback transport actions on Windows."""
+    normalized = re.sub(r"\s+", "_", control.strip().lower())
+    confirmations = {
+        "pause": "Paused Spotify, sir.",
+        "resume": "Resumed Spotify, sir.",
+        "next": "Skipping to the next track, sir.",
+        "previous": "Going back to the previous track, sir.",
+        "play_first_result": "Playing the first Spotify result, sir.",
+    }
+
+    if normalized not in confirmations:
+        return {
+            "success": False,
+            "confirmation": "I don't recognize that Spotify control yet, sir.",
+        }
+
+    success, detail = await _control_spotify_transport(normalized)
+    if not success and detail:
+        log.warning(f"control_spotify ({normalized}) failed: {detail}")
+
+    return {
+        "success": success,
+        "confirmation": confirmations[normalized] if success else f"I had trouble controlling Spotify, sir.",
     }
 
 
