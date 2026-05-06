@@ -9,8 +9,17 @@
   <body>
     <canvas id="orb-canvas"></canvas>
 
+    <!-- Training mode pill — top left -->
+    <div id="training-toggle" title="Toggle Training Mode">
+      <span id="training-dot"></span>
+      <span id="training-label">training</span>
+    </div>
+
     <!-- Minimal controls — top right -->
     <div id="controls">
+      <button id="btn-voice-mode" title="Voice mode: Online (Web Speech API). Click to switch to Offline (Whisper)" style="font-size:10px;padding:3px 7px;opacity:0.7;">
+        🌐 Online
+      </button>
       <button id="btn-mute" title="Mute/Unmute">
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
           <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
@@ -35,6 +44,40 @@
     <div id="status-text"></div>
     <div id="jarvis-label">JARVIS</div>
     <div id="error-text"></div>
+
+    <!-- Feedback confirmation box -->
+    <div id="feedback-box" style="display:none" aria-live="polite">
+      <div id="feedback-header">
+        <span id="feedback-label">command verified?</span>
+        <button id="btn-feedback-dismiss" title="Dismiss">×</button>
+      </div>
+      <div id="feedback-cmd-row">
+        <span class="feedback-tag">kamu</span>
+        <span id="feedback-cmd-text"></span>
+      </div>
+      <div id="feedback-res-row">
+        <span class="feedback-tag">aksi</span>
+        <span id="feedback-res-text"></span>
+      </div>
+      <div id="feedback-actions">
+        <button id="btn-feedback-yes" title="Correct — save as confirmed">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg>
+          benar
+        </button>
+        <button id="btn-feedback-no" title="Wrong — teach JARVIS">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+          salah
+        </button>
+      </div>
+      <div id="feedback-correction-form" style="display:none">
+        <input id="feedback-correction-input" type="text" placeholder="seharusnya jarvis..." autocomplete="off" spellcheck="false" />
+        <div id="feedback-correction-btns">
+          <button id="btn-feedback-cancel">batal</button>
+          <button id="btn-feedback-send" class="primary">kirim</button>
+        </div>
+      </div>
+      <div id="feedback-progress-bar"><div id="feedback-progress-fill"></div></div>
+    </div>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

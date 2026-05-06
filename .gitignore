@@ -18,9 +18,13 @@ __pycache__/
 data/*.jsonl
 data/active_session.json
 data/.jarvis_output.txt
+data/fish_tts_audit/
 
 # Certificates
 *.pem
+*.crt
+*.cer
+cert.lan.meta.json
 
 # Build
 dist/
@@ -39,3 +43,17 @@ desktop-overlay/node_modules/
 context/
 *.db-shm
 *.db-wal
+*.log
+
+# Local runtime artifacts
+jarvis-feedback-log.md
+test.wav
+tmp_voxcpm_test.json
+voxcpm_load_test.log
+.jarvis-chrome-profile/
+
+# Local models / cloned dependencies
+kokoro-v1.0.onnx
+voices-v1.0.bin
+kokoro-onnx/
+local transcribe/

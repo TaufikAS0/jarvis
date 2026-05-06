@@ -11,6 +11,10 @@ $backendErr = Join-Path $root "backend.err.log"
 $frontendDir = Join-Path $root "frontend"
 $frontendLog = Join-Path $frontendDir "frontend.log"
 $frontendErr = Join-Path $frontendDir "frontend.err.log"
+$jarvisChromeProfile = Join-Path $env:LOCALAPPDATA "JarvisChromeProfile"
+$frontendPackageJson = Join-Path $frontendDir "package.json"
+$defaultVoxCpmModelPath = "D:\AI Project\VoxCPM2"
+$launchUrl = "http://127.0.0.1:5173"
 
 function Stop-JarvisProcess {
     param(
@@ -27,6 +31,48 @@ function Stop-JarvisProcess {
             Stop-Process -Id $target.ProcessId -Force -ErrorAction Stop
         } catch {
             Write-Warning "Failed to stop $Name $($target.ProcessId): $($_.Exception.Message)"
+        }
+    }
+}
+
+function Stop-JarvisBrowser {
+    param(
+        [string]$UrlNeedle,
+        [string]$ProfilePath
+    )
+
+    $targets = Get-CimInstance Win32_Process | Where-Object {
+        $_.Name -eq "chrome.exe" -and (
+            ($_.CommandLine -like "*$UrlNeedle*") -or
+            ($_.CommandLine -like "*$ProfilePath*")
+        )
+    }
+
+    foreach ($target in $targets | Select-Object -Unique ProcessId,CommandLine) {
+        try {
+            & taskkill.exe /PID $target.ProcessId /T /F 2>$null | Out-Null
+        } catch {
+            # Process already gone — ignore silently
+        }
+    }
+}
+
+function Stop-JarvisFrontend {
+    param(
+        [string]$FrontendNeedle
+    )
+
+    $nodeTargets = @(Get-CimInstance Win32_Process | Where-Object {
+        $_.Name -eq "node.exe" -and $_.CommandLine -like "*$FrontendNeedle*"
+    })
+
+    $parentIds = @($nodeTargets | ForEach-Object { $_.ParentProcessId } | Where-Object { $_ })
+
+    $targetIds = @($nodeTargets | ForEach-Object { $_.ProcessId }) + $parentIds
+    foreach ($targetId in $targetIds | Select-Object -Unique) {
+        try {
+            & taskkill.exe /PID $targetId /T /F 2>$null | Out-Null
+        } catch {
         }
     }
 }
@@ -58,13 +104,71 @@ function Wait-HttpOk {
 }
 
 Stop-JarvisProcess -Name "python.exe" -Needle "server.py"
-Stop-JarvisProcess -Name "node.exe" -Needle "\vite\bin\vite.js"
+Stop-JarvisProcess -Name "python.exe" -Needle "tts_server.py"
+Stop-JarvisProcess -Name "python.exe" -Needle "tts_server_voxcpm.py"
+Stop-JarvisFrontend -FrontendNeedle $frontendDir
+Stop-JarvisBrowser -UrlNeedle "http://localhost:5173" -ProfilePath $jarvisChromeProfile
+Stop-JarvisBrowser -UrlNeedle $launchUrl -ProfilePath $jarvisChromeProfile
 
 Remove-Item $backendLog, $backendErr, $frontendLog, $frontendErr -ErrorAction SilentlyContinue
+New-Item -ItemType Directory -Path $jarvisChromeProfile -Force | Out-Null
 
 $pythonLauncher = "C:\Windows\py.exe"
 if (-not (Test-Path $pythonLauncher)) {
     throw "Python launcher not found at $pythonLauncher"
+}
+if (-not (Test-Path $frontendPackageJson)) {
+    throw "Frontend package.json not found at $frontendPackageJson"
+}
+
+$frontendLauncher = (Get-Command npm.cmd -ErrorAction Stop).Source
+
+# --- Auto-start local TTS server if configured ---
+$envFile = Join-Path $root ".env"
+$ttsProvider = "fish"
+$ttsEngine = "kokoro"
+$voxModelPath = $defaultVoxCpmModelPath
+if (Test-Path $envFile) {
+    foreach ($envLine in Get-Content $envFile) {
+        if ($envLine -match '^\s*#') {
+            continue
+        }
+        if ($envLine -match '^\s*JARVIS_TTS_PROVIDER\s*=\s*(.+?)\s*$') {
+            $ttsProvider = $matches[1].Trim().Trim("'").Trim('"').ToLower()
+            continue
+        }
+        if ($envLine -match '^\s*JARVIS_LOCAL_TTS_ENGINE\s*=\s*(.+?)\s*$') {
+            $ttsEngine = $matches[1].Trim().Trim("'").Trim('"').ToLower()
+            continue
+        }
+        if ($envLine -match '^\s*JARVIS_LOCAL_TTS_MODEL_PATH\s*=\s*(.+?)\s*$') {
+            $voxModelPath = $matches[1].Trim().Trim("'").Trim('"')
+            continue
+        }
+    }
+}
+
+if ($ttsProvider -eq "local") {
+    $resolvedTtsEngine = if ($ttsEngine -like "vox*") { "voxcpm" } else { "kokoro" }
+    if ($resolvedTtsEngine -eq "voxcpm") {
+        Write-Host "VoxCPM2 auto-start is disabled in launcher."
+        Write-Host "Enable it explicitly from JARVIS Settings when you want to use the heavier local voice engine."
+    } else {
+        $ttsScriptName = "tts_server.py"
+        $ttsServerPath = Join-Path $root $ttsScriptName
+        $ttsLog = Join-Path $root (($ttsScriptName -replace '\.py$', '.log'))
+        $ttsErrLog = Join-Path $root (($ttsScriptName -replace '\.py$', '.err.log'))
+        if (Test-Path $ttsServerPath) {
+            Remove-Item Env:VOXCPM_MODEL_PATH -ErrorAction SilentlyContinue
+            Write-Host "Starting local TTS server (Kokoro)..."
+            Start-Process -FilePath $pythonLauncher `
+                -ArgumentList "-3.11", $ttsScriptName `
+                -WorkingDirectory $root `
+                -RedirectStandardOutput $ttsLog `
+                -RedirectStandardError $ttsErrLog | Out-Null
+            Start-Sleep -Seconds 3
+        }
+    }
 }
 
 Start-Process -FilePath $pythonLauncher `
@@ -77,13 +181,13 @@ if (-not (Wait-HttpOk -Url "https://localhost:8340/api/health" -SkipCertCheck -T
     throw "Backend failed to start. Check $backendErr"
 }
 
-Start-Process -FilePath "npm.cmd" `
-    -ArgumentList "run", "dev" `
+Start-Process -FilePath $frontendLauncher `
+    -ArgumentList @("run", "dev", "--", "--host", "127.0.0.1", "--port", "5173", "--strictPort") `
     -WorkingDirectory $frontendDir `
     -RedirectStandardOutput $frontendLog `
     -RedirectStandardError $frontendErr | Out-Null
 
-if (-not (Wait-HttpOk -Url "http://localhost:5173" -TimeoutSeconds 30)) {
+if (-not (Wait-HttpOk -Url $launchUrl -TimeoutSeconds 30)) {
     throw "Frontend failed to start. Check $frontendErr"
 }
 
@@ -92,21 +196,48 @@ $chromeCandidates = @(
     "C:\Program Files (x86)\Google\Chrome\Application\chrome.exe"
 )
 
-$chromeArgs = @("http://localhost:5173")
+function New-ChromeProfileArg {
+    param(
+        [string]$ProfilePath
+    )
+
+    return ('--user-data-dir="{0}"' -f $ProfilePath)
+}
+
+$chromeArgs = @(
+    (New-ChromeProfileArg -ProfilePath $jarvisChromeProfile),
+    "--no-first-run",
+    "--disable-session-crashed-bubble",
+    $launchUrl
+)
 if ($WindowMode -eq "fullscreen") {
-    $chromeArgs = @("--new-window", "--kiosk", "http://localhost:5173")
+    $chromeArgs = @(
+        "--new-window",
+        "--kiosk",
+        (New-ChromeProfileArg -ProfilePath $jarvisChromeProfile),
+        "--no-first-run",
+        "--disable-session-crashed-bubble",
+        $launchUrl
+    )
 } elseif ($WindowMode -eq "maximized") {
-    $chromeArgs = @("--new-window", "--start-maximized", "http://localhost:5173")
+    $chromeArgs = @(
+        "--new-window",
+        "--start-maximized",
+        (New-ChromeProfileArg -ProfilePath $jarvisChromeProfile),
+        "--no-first-run",
+        "--disable-session-crashed-bubble",
+        $launchUrl
+    )
 }
 
 $chrome = $chromeCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
 if ($chrome) {
     Start-Process -FilePath $chrome -ArgumentList $chromeArgs | Out-Null
 } else {
-    Start-Process "http://localhost:5173" | Out-Null
+    Start-Process $launchUrl | Out-Null
 }
 
 Write-Host "JARVIS started."
-Write-Host "Frontend: http://localhost:5173"
+Write-Host "Frontend: $launchUrl"
 Write-Host "Backend: https://localhost:8340"
 Write-Host "Window mode: $WindowMode"

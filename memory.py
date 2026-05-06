@@ -12,6 +12,7 @@ so JARVIS gets smarter over time.
 
 import json
 import logging
+import re
 import sqlite3
 import time
 from datetime import datetime, timedelta
@@ -20,6 +21,12 @@ from pathlib import Path
 log = logging.getLogger("jarvis.memory")
 
 DB_PATH = Path(__file__).parent / "data" / "jarvis.db"
+_FEEDBACK_SYNC_MTIMES: dict[str, float] = {}
+_FEEDBACK_DATE_RE = re.compile(r"^##\s+(\d{4}-\d{2}-\d{2})\s*$")
+_FEEDBACK_HEADER_RE = re.compile(r"^###\s+(.+?)\s+[—-]\s+(\d{2}:\d{2}:\d{2})\s*$")
+_FEEDBACK_FIELD_RE = re.compile(
+    r"^- \*\*(Command|Response|JARVIS said|Should have)\*\*:\s*(.*)$"
+)
 
 
 def _get_db() -> sqlite3.Connection:
@@ -93,23 +100,256 @@ def init_db():
 # Memories — facts JARVIS learns
 # ---------------------------------------------------------------------------
 
-def remember(content: str, mem_type: str = "fact", source: str = "", importance: int = 5) -> int:
-    """Store a memory. Returns the memory ID."""
-    conn = _get_db()
+def _insert_memory(
+    conn: sqlite3.Connection,
+    *,
+    content: str,
+    mem_type: str = "fact",
+    source: str = "",
+    importance: int = 5,
+    created_at: float | None = None,
+) -> int:
+    timestamp = time.time() if created_at is None else created_at
     cur = conn.execute(
         "INSERT INTO memories (type, content, source, importance, created_at) VALUES (?, ?, ?, ?, ?)",
-        (mem_type, content, source, importance, time.time())
+        (mem_type, content, source, importance, timestamp)
     )
     mem_id = cur.lastrowid
-    # Update FTS
     conn.execute(
         "INSERT INTO memory_fts (rowid, content, type, source) VALUES (?, ?, ?, ?)",
         (mem_id, content, mem_type, source)
+    )
+    return mem_id
+
+
+def remember(
+    content: str,
+    mem_type: str = "fact",
+    source: str = "",
+    importance: int = 5,
+    created_at: float | None = None,
+) -> int:
+    """Store a memory. Returns the memory ID."""
+    conn = _get_db()
+    mem_id = _insert_memory(
+        conn,
+        content=content,
+        mem_type=mem_type,
+        source=source,
+        importance=importance,
+        created_at=created_at,
     )
     conn.commit()
     conn.close()
     log.info(f"Stored memory [{mem_type}]: {content[:60]}")
     return mem_id
+
+
+def _memory_exists(conn: sqlite3.Connection, content: str, mem_type: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM memories WHERE type = ? AND content = ? LIMIT 1",
+        (mem_type, content),
+    ).fetchone()
+    return row is not None
+
+
+def _get_feedback_log_paths() -> list[Path]:
+    paths: list[Path] = [Path(__file__).parent / "jarvis-feedback-log.md"]
+
+    try:
+        from actions import _get_primary_obsidian_vault
+
+        vault = _get_primary_obsidian_vault()
+        if vault:
+            _, vault_path = vault
+            paths.append(Path(vault_path) / "JARVIS" / "jarvis-feedback-log.md")
+    except Exception as exc:
+        log.debug(f"Feedback log path discovery failed: {exc}")
+
+    unique_paths: list[Path] = []
+    seen: set[str] = set()
+    for path in paths:
+        key = str(path).lower()
+        if key not in seen:
+            seen.add(key)
+            unique_paths.append(path)
+    return unique_paths
+
+
+def _parse_feedback_log_entries(text: str) -> list[dict]:
+    entries: list[dict] = []
+    current_date = ""
+    current: dict | None = None
+
+    def flush_current() -> None:
+        if not current:
+            return
+
+        fields = current.get("fields", {})
+        kind = str(current.get("kind", "")).strip()
+        command = str(fields.get("Command", "")).strip()
+        if not current_date or not kind or not command:
+            return
+
+        timestamp = None
+        time_str = str(current.get("time", "")).strip()
+        if time_str:
+            try:
+                timestamp = datetime.strptime(
+                    f"{current_date} {time_str}", "%Y-%m-%d %H:%M:%S"
+                ).timestamp()
+            except ValueError:
+                timestamp = None
+
+        if kind == "confirm":
+            response = str(fields.get("Response", "")).strip()
+            if not response:
+                return
+            entries.append(
+                {
+                    "entry_id": f"{current_date}|{time_str}|confirm|{command}".lower(),
+                    "command": command,
+                    "type": "confirmed",
+                    "importance": 8,
+                    "created_at": timestamp,
+                    "content": f"[CONFIRMED CORRECT] User said: '{command}' → JARVIS responded: '{response}'",
+                }
+            )
+            return
+
+        if kind == "correction":
+            response = str(fields.get("JARVIS said", "")).strip()
+            correction = str(fields.get("Should have", "")).strip()
+            if not correction:
+                return
+            entries.append(
+                {
+                    "entry_id": f"{current_date}|{time_str}|correction|{command}".lower(),
+                    "command": command,
+                    "type": "correction",
+                    "importance": 9,
+                    "created_at": timestamp,
+                    "content": (
+                        f"[CORRECTION] When user says '{command}', JARVIS said '{response}' — "
+                        f"but should have: {correction}"
+                    ),
+                }
+            )
+
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+
+        date_match = _FEEDBACK_DATE_RE.match(line)
+        if date_match:
+            flush_current()
+            current = None
+            current_date = date_match.group(1)
+            continue
+
+        header_match = _FEEDBACK_HEADER_RE.match(line)
+        if header_match:
+            flush_current()
+            header_text = header_match.group(1).lower()
+            if "confirmed correct" in header_text:
+                kind = "confirm"
+            elif "correction" in header_text:
+                kind = "correction"
+            else:
+                current = None
+                continue
+
+            current = {"kind": kind, "time": header_match.group(2), "fields": {}}
+            continue
+
+        field_match = _FEEDBACK_FIELD_RE.match(line)
+        if field_match and current:
+            current["fields"][field_match.group(1)] = field_match.group(2).strip()
+
+    flush_current()
+    return entries
+
+
+def sync_feedback_logs(force: bool = False) -> dict:
+    """
+    Import feedback entries from Markdown logs into SQLite memory.
+
+    This turns the Obsidian feedback note into an active source of memory
+    instead of a passive archive.
+    """
+    summary = {
+        "scanned_files": 0,
+        "skipped_files": 0,
+        "parsed_entries": 0,
+        "imported_entries": 0,
+        "updated_entries": 0,
+    }
+    conn = _get_db()
+
+    try:
+        for path in _get_feedback_log_paths():
+            if not path.exists():
+                continue
+
+            path_key = str(path.resolve())
+            try:
+                mtime = path.stat().st_mtime
+            except OSError:
+                continue
+
+            if not force and _FEEDBACK_SYNC_MTIMES.get(path_key) == mtime:
+                summary["skipped_files"] += 1
+                continue
+
+            try:
+                text = path.read_text(encoding="utf-8")
+            except UnicodeDecodeError:
+                text = path.read_text(encoding="utf-8", errors="ignore")
+            except OSError as exc:
+                log.warning(f"Feedback log read failed for {path}: {exc}")
+                continue
+
+            entries = _parse_feedback_log_entries(text)
+            summary["scanned_files"] += 1
+            summary["parsed_entries"] += len(entries)
+
+            for entry in entries:
+                content = str(entry.get("content", "")).strip()
+                mem_type = str(entry.get("type", "fact")).strip()
+                if not content or not mem_type:
+                    continue
+
+                source_key = f"feedback_log:{path.name}:{entry.get('entry_id', '')}"
+                importance = int(entry.get("importance", 5) or 5)
+                created_at = entry.get("created_at")
+
+                if _memory_exists(conn, content, mem_type):
+                    continue
+
+                _insert_memory(
+                    conn,
+                    content=content,
+                    mem_type=mem_type,
+                    source=source_key,
+                    importance=importance,
+                    created_at=created_at,
+                )
+                summary["imported_entries"] += 1
+
+            _FEEDBACK_SYNC_MTIMES[path_key] = mtime
+
+        conn.commit()
+    finally:
+        conn.close()
+
+    if summary["imported_entries"] or summary["updated_entries"]:
+        log.info(
+            "Feedback sync imported %s and updated %s entries from Markdown logs",
+            summary["imported_entries"],
+            summary["updated_entries"],
+        )
+    return summary
 
 
 def _sanitize_fts_query(query: str) -> str:
@@ -322,6 +562,11 @@ def build_memory_context(user_message: str) -> str:
     Searches for relevant memories based on what the user is talking about.
     Fast — runs FTS queries, no heavy computation.
     """
+    try:
+        sync_feedback_logs()
+    except Exception as exc:
+        log.debug(f"Feedback sync skipped: {exc}")
+
     parts = []
 
     # Always include: open high-priority tasks
